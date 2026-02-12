@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Cloud RAM Dashboard</title>
+
+  <!-- Supabase + auth helper -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/static/config.js" defer></script>
+  <script src="/static/status_auth.js?v=6" defer></script>
+
+
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #1e3c72, #2a5298);
+      color: #fff;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    .spinner {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 3px solid #fff;
+      border-radius: 50%;
+      border-top: 3px solid #00c4cc;
+      animation: spin 1s linear infinite;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .button {
+      background-color: #00c4cc;
+      border: none;
+      color: white;
+      padding: 10px 18px;
+      margin: 8px 4px;
+      font-size: 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.3s ease;
+    }
+    .button:hover { background-color: #009fa3; }
+    .button:disabled { background-color: #999; cursor: not-allowed; opacity: 0.6; }
+    .danger { background-color: #ff5b5b; }
+    .danger:hover { background-color: #e04747; }
+
+    iframe { width: 100%; height: 500px; border: none; }
+    #tasks { min-width: 320px; min-height: 140px; }
+  </style>
+</head>
+
+<body>
+  <h1>Cloud RAM Dashboard</h1>
+  <div id="status-text">Loading...</div>
+
+  <div style="margin-top:12px;">
+    <button class="button danger" id="stop-vm-btn">Stop VM</button>
+    <span id="stop-spinner" style="display:none;" class="spinner"></span>
+    <p id="stop-status" style="margin-top: 10px; font-weight: bold;"></p>
+  </div>
+
+  <h2>Running Tasks</h2>
+  <div id="tasks-container">
+    <p id="task-loading">Fetching tasks...</p>
+    <select id="tasks" multiple></select>
+    <div>
+      <button class="button" id="migrate-btn">Migrate Selected Tasks</button>
+      <span id="migration-spinner" style="display:none;" class="spinner"></span>
+      <p id="migration-status" style="margin-top: 10px; font-weight: bold;"></p>
+      <button class="button" id="migrate-vscode-btn" style="display:none;">Migrate VSCode Project</button>
+      <span id="vscode-spinner" style="display:none;" class="spinner"></span>
+      <p id="vscode-status" style="margin-top: 10px; font-weight: bold;"></p>
+      <button class="button" id="save-local-btn">Save Project to Local</button>
+      <span id="save-local-spinner" style="display:none;" class="spinner"></span>
+      <p id="save-local-status" style="margin-top: 10px; font-weight: bold;"></p>
+    </div>
+  </div>
+
+  <h2>VM GUI (VNC)</h2>
+  <div id="vnc-container">
+    <p id="vnc-loading">Loading VM GUI...</p>
+    <iframe id="vnc-iframe" style="display: none;"></iframe>
+    <button class="button" onclick="toggleFullscreen()" style="margin-top: 10px;">Toggle Fullscreen</button>
+  </div>
+
+  <script>
+    let taskArray = [];
+    let vmIp = null;
+    let vmId = null;
+
+    document.addEventListener("DOMContentLoaded", () => {
+      const stopBtn = document.getElementById("stop-vm-btn");
+      if (stopBtn) stopBtn.addEventListener("click", stopVmNow);
+
+      const migrateBtn = document.getElementById("migrate-btn");
+      if (migrateBtn) migrateBtn.addEventListener("click", migrateSelectedTasks);
+
+      const migrateVSCodeBtn = document.getElementById("migrate-vscode-btn");
+      if (migrateVSCodeBtn) migrateVSCodeBtn.addEventListener("click", migrateVSCodeProject);
+
+      const saveBtn = document.getElementById("save-local-btn");
+      if (saveBtn) saveBtn.addEventListener("click", saveProjectToLocal);
+
+
+      // start dashboard load
+      initDashboard();
+    });
+
+    async function apiBase() {
+      const cfg = await window.loadAppConfig();
+      return (cfg.API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
+    }
+
+    async function saveProjectToLocal() {
+      const btn = document.getElementById("save-local-btn");
+      const spinner = document.getElementById("save-local-spinner");
+      const statusEl = document.getElementById("save-local-status");
+
+      try {
+        spinner.style.display = "inline-block";
+        btn.disabled = true;
+        statusEl.style.color = "white";
+        statusEl.textContent = "";
+
+        const headers = await window.getAuthHeaders();
+
+        // you must send which project to save
+        // simplest: prompt user for name
+        const project_name = prompt("Enter project folder name to save (example: CloudRAMSaaS):");
+        if (!project_name) return;
+
+        const info = await fetchMyVmWithRetries(6, 3000);
+        if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
+        vmIp = info.ip;
+
+        const resp = await fetch("${await apiBase()}/save_project_to_local", {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ vm_ip: vmIp, project_name })
+        });
+
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = { raw: text }; }
+        if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "Save failed.");
+
+        statusEl.style.color = "lightgreen";
+        statusEl.textContent = `✅ ${data.message}`;
+
+      } catch (e) {
+        statusEl.style.color = "crimson";
+        statusEl.textContent = `❌ ${e.message || e}`;
+      } finally {
+        spinner.style.display = "none";
+        btn.disabled = false;
+      }
+    }
+
+
+    // ---------------------------
+    // ✅ Option 2: ALWAYS refresh IP from backend (/my_vm)
+    // ---------------------------
+    async function fetchMyVmWithRetries(maxTries = 30, delayMs = 5000) {
+      const headers = await window.getAuthHeaders();
+
+      for (let i = 1; i <= maxTries; i++) {
+        const resp = await fetch("${await apiBase()}/my_vm", { headers });
+        const text = await resp.text();
+        let info;
+        try { info = JSON.parse(text); } catch { info = { raw: text }; }
+
+        if (!resp.ok) {
+          throw new Error(info.detail || info.error || info.raw || `my_vm failed (${resp.status})`);
+        }
+
+        if (!info.exists) return info;
+
+        // if running/pending but ip missing, wait and retry
+        if ((info.state === "running" || info.state === "pending") && !info.ip) {
+          document.getElementById("status-text").innerHTML =
+            `⏳ VM is ${info.state}. Waiting for public IP... (try ${i}/${maxTries})`;
+          await new Promise(r => setTimeout(r, delayMs));
+          continue;
+        }
+
+        return info;
+      }
+
+      throw new Error("Timed out waiting for VM IP after resume. Try again in a minute.");
+    }
+
+    async function initDashboard() {
+      try {
+        document.getElementById("status-text").innerHTML = "⏳ Loading VM info...";
+
+        const info = await fetchMyVmWithRetries(36, 5000); // ~3 minutes
+
+        if (!info.exists) {
+          document.getElementById("status-text").innerHTML =
+            "❌ No VM found for your account. Go to Allocate page and create one.";
+          return;
+        }
+
+        vmId = info.vm_id || null;
+        vmIp = info.ip || null;
+
+        if (vmId) localStorage.setItem("vm_id", vmId);
+        if (vmIp) localStorage.setItem("vm_ip", vmIp);
+
+        if (info.state === "stopped" || info.state === "stopping") {
+          document.getElementById("status-text").innerHTML =
+            `🟡 VM is ${info.state}. Go to Allocate page and click Resume.`;
+          return;
+        }
+
+        if (!vmIp) {
+          document.getElementById("status-text").innerHTML =
+            "⚠️ VM exists but has no IP yet. Please wait and refresh.";
+          return;
+        }
+
+        // Load VNC first (best UX)
+        loadVncGui();
+
+        // Then load RAM + tasks
+        await fetchRamUsage();
+        fetchLocalTasks();
+
+      } catch (e) {
+        console.error("initDashboard failed:", e);
+        document.getElementById("status-text").innerHTML = `❌ ${e.message || e}`;
+      }
+    }
+
+    async function fetchRamUsage() {
+      const headers = await window.getAuthHeaders();
+
+      const response = await fetch(`${await apiBase()}/ram_usage?vm_ip=${encodeURIComponent(vmIp)}`, { headers });
+      if (!response.ok) {
+        const txt = await response.text().catch(() => "");
+        throw new Error(`RAM usage failed (${response.status}): ${txt || response.statusText}`);
+      }
+
+      const data = await response.json();
+      document.getElementById("status-text").innerHTML = `
+        ✅ Cloud RAM Running at ${vmIp} <br>
+        🔹 Total RAM: ${(data.total_ram / (1024 ** 3)).toFixed(2)} GB<br>
+        🔹 Used RAM: ${(data.used_ram / (1024 ** 3)).toFixed(2)} GB (${data.percent_used}%)<br>
+        🔹 Available RAM: ${(data.available_ram / (1024 ** 3)).toFixed(2)} GB
+      `;
+    }
+
+    // ---------------------------
+    // ✅ Stop button (reliable)
+    // ---------------------------
+    async function stopVmNow() {
+      const stopBtn = document.getElementById("stop-vm-btn");
+      const spinner = document.getElementById("stop-spinner");
+      const statusEl = document.getElementById("stop-status");
+
+      try {
+        statusEl.textContent = "";
+        statusEl.style.color = "white";
+        spinner.style.display = "inline-block";
+        stopBtn.disabled = true;
+
+        const headers = await window.getAuthHeaders();
+        const vm_id = localStorage.getItem("vm_id");
+        if (!vm_id) throw new Error("No vm_id found in localStorage.");
+
+        const resp = await fetch("${await apiBase()}/stop_vm", {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ vm_id })
+        });
+
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+        if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "Stop failed.");
+
+        statusEl.style.color = "lightgreen";
+        statusEl.textContent = "✅ Stop requested. VM will enter STOPPED state shortly.";
+
+      } catch (e) {
+        statusEl.style.color = "crimson";
+        statusEl.textContent = `❌ ${e.message || e}`;
+      } finally {
+        spinner.style.display = "none";
+        stopBtn.disabled = false;
+      }
+    }
+
+    // ---------------------------
+    // ✅ Tasks list (local)
+    // ---------------------------
+    function fetchLocalTasks() {
+      const taskList = document.getElementById("tasks");
+      const loadingText = document.getElementById("task-loading");
+
+      loadingText.style.display = "block";
+      loadingText.style.color = "white";
+      loadingText.innerText = "Fetching tasks...";
+      taskList.innerHTML = "";
+      taskArray = [];
+
+      fetch("${await apiBase()}/running_tasks/")
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
+        .then(data => {
+          loadingText.style.display = "none";
+
+          if (!data.tasks || data.tasks.length === 0) {
+            taskList.innerHTML = "<option>No running tasks found</option>";
+            return;
+          }
+
+          data.tasks.forEach(task => {
+            if (['notepad++.exe', 'chrome.exe', 'Code.exe'].includes(task.name)) {
+              taskArray.push({ pid: task.pid, name: task.name });
+            }
+          });
+
+          const hasVSCode = (data.tasks || []).some(t => (t.name || "").toLowerCase() === "code.exe");
+          document.getElementById("migrate-vscode-btn").style.display = hasVSCode ? "inline-block" : "none";
+
+
+          populateDropdown();
+          loadingText.style.display = "block";
+          loadingText.innerText = `${taskArray.length} tasks fetched.`;
+        })
+        .catch(err => {
+          console.error("❌ Error fetching local tasks:", err);
+          loadingText.style.display = "block";
+          loadingText.style.color = "crimson";
+          loadingText.innerText = `❌ Failed to fetch tasks: ${err.message || err}`;
+        });
+    }
+
+    function populateDropdown() {
+      const taskList = document.getElementById("tasks");
+      taskList.innerHTML = "";
+
+      if (taskArray.length === 0) {
+        const opt = document.createElement("option");
+        opt.text = "No tasks available";
+        taskList.add(opt);
+        return;
+      }
+
+      taskArray.forEach(t => {
+        const opt = document.createElement("option");
+        opt.value = t.pid;
+        opt.text = `${t.name} (PID: ${t.pid})`;
+        taskList.add(opt);
+      });
+    }
+
+    // ---------------------------
+    // ✅ Migrate (protected) - uses refreshed vmIp
+    // ---------------------------
+    async function migrateSelectedTasks() {
+      const migrateBtn = document.getElementById("migrate-btn");
+      const spinner = document.getElementById("migration-spinner");
+      const statusEl = document.getElementById("migration-status");
+      const taskSelect = document.getElementById("tasks");
+
+      try {
+        spinner.style.display = "inline-block";
+        migrateBtn.disabled = true;
+        statusEl.style.color = "white";
+        statusEl.textContent = "";
+
+        // Always use latest IP (Option 2)
+        const info = await fetchMyVmWithRetries(6, 3000);
+        if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
+        vmIp = info.ip;
+        localStorage.setItem("vm_ip", vmIp);
+
+        // Selected tasks
+        const selectedOptions = Array.from(taskSelect.selectedOptions);
+        if (selectedOptions.length === 0) {
+          statusEl.textContent = "⚠️ Select at least one task.";
+          return;
+        }
+
+        const task_names = selectedOptions.map(opt => opt.text.split(" (PID:")[0].trim());
+
+        const headers = await window.getAuthHeaders();
+
+        const response = await fetch("${await apiBase()}/migrate_tasks/", {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ task_names, vm_ip: vmIp })
+        });
+
+        const text = await response.text();
+        let result;
+        try { result = JSON.parse(text); } catch { result = { raw: text }; }
+
+        if (!response.ok) {
+          throw new Error(result.detail || result.error || result.raw || "Migration failed.");
+        }
+
+        const okCount = (result.results || []).filter(r => r.success).length;
+        const total = (result.results || []).length;
+
+        statusEl.style.color = "lightgreen";
+        statusEl.textContent = `✅ Migration completed: ${okCount}/${total} succeeded.`;
+
+      } catch (err) {
+        console.error(err);
+        statusEl.style.color = "crimson";
+        statusEl.textContent = `❌ ${err.message || err}`;
+      } finally {
+        spinner.style.display = "none";
+        migrateBtn.disabled = false;
+      }
+    }
+
+    async function migrateVSCodeProject() {
+    const btn = document.getElementById("migrate-vscode-btn");
+    const spinner = document.getElementById("vscode-spinner");
+    const statusEl = document.getElementById("vscode-status");
+
+    try {
+    spinner.style.display = "inline-block";
+    btn.disabled = true;
+    statusEl.style.color = "white";
+    statusEl.textContent = "";
+
+    // Always use latest VM IP
+    const info = await fetchMyVmWithRetries(10, 3000);
+    if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
+    vmIp = info.ip;
+    localStorage.setItem("vm_ip", vmIp);
+
+    const headers = await window.getAuthHeaders();
+
+    const resp = await fetch("${await apiBase()}/migrate_vscode/", {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({ vm_ip: vmIp })
+    });
+
+    const text = await resp.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+    if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "VSCode migration failed.");
+
+    statusEl.style.color = "lightgreen";
+    statusEl.textContent = `✅ VSCode migrated. Opened on VM: ${data.opened_path || "unknown"}`;
+
+    } catch (e) {
+    statusEl.style.color = "crimson";
+    statusEl.textContent = `❌ ${e.message || e}`;
+    } finally {
+    spinner.style.display = "none";
+    btn.disabled = false;
+    }
+    }
+
+    // ---------------------------
+    // ✅ VNC iframe uses refreshed vmIp
+    // ---------------------------
+    function loadVncGui() {
+      if (!vmIp) {
+        document.getElementById("vnc-loading").innerText =
+          "❌ No VM IP found. Please ensure Cloud RAM is running.";
+        return;
+      }
+
+      const vncUrl = `http://${vmIp}:8080/vnc.html?autoconnect=true&resize=scale`;
+      const iframe = document.getElementById("vnc-iframe");
+      const loading = document.getElementById("vnc-loading");
+
+      iframe.src = vncUrl;
+
+      iframe.onload = () => {
+        loading.style.display = "none";
+        iframe.style.display = "block";
+      };
+
+      iframe.onerror = () => {
+        loading.style.color = "crimson";
+        loading.innerText = "❌ Failed to load VM GUI inside iframe. Try opening VNC in a new tab.";
+      };
+    }
+
+    function toggleFullscreen() {
+      const iframe = document.getElementById("vnc-iframe");
+      if (!document.fullscreenElement) {
+        if (iframe.requestFullscreen) iframe.requestFullscreen();
+      } else {
+        if (document.exitFullscreen) document.exitFullscreen();
+      }
+    }
+  </script>
+</body>
+</html>

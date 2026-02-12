@@ -1,0 +1,457 @@
+console.log("✅ script.js loaded");
+
+async function apiBase() {
+  const cfg = await window.loadAppConfig();
+  return (cfg.API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
+}
+
+// =========================
+// ✅ NAVIGATION (DEFINE FIRST + GLOBAL)
+// =========================
+function navigate(page, pushState = true) {
+  const pages = ["login-page", "register-page", "home-page", "allocate-page"];
+
+  pages.forEach((p) => {
+    const el = document.getElementById(p);
+    if (el) el.style.display = "none";
+  });
+
+  const target = document.getElementById(`${page}-page`);
+  if (target) target.style.display = "block";
+
+  const nav = document.getElementById("nav");
+  if (nav) nav.style.display = (page === "login" || page === "register") ? "none" : "block";
+
+  if (pushState) {
+    const newPath =
+      page === "login" ? "/login" :
+      page === "register" ? "/register" :
+      page === "home" ? "/" :
+      page === "allocate" ? "/allocate" : "/";
+
+    window.history.pushState({}, "", newPath);
+  }
+
+  if (page === "allocate") {
+    setTimeout(() => checkExistingVmAndRenderChoices(), 0);
+  }
+}
+
+function routeByPath() {
+  const path = window.location.pathname.toLowerCase();
+  if (path === "/register") return navigate("register", false);
+  if (path === "/login") return navigate("login", false);
+  if (path === "/allocate") return navigate("allocate", false);
+  return navigate("login", false);
+}
+
+window.navigate = navigate;
+
+// =========================
+// ✅ SUPABASE CONFIG
+// =========================
+
+
+async function getSb() {
+  if (window._sbClient) return window._sbClient;
+
+  const cfg = await window.loadAppConfig();
+
+  if (!window.supabase || !window.supabase.createClient) {
+    console.error("❌ Supabase SDK not loaded. Check index.html script order.");
+    return null;
+  }
+
+  window._sbClient = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+  return window._sbClient;
+}
+
+// =========================
+// ✅ AUTH UI REFRESH
+// =========================
+async function refreshUIForSession() {
+  const sb = await getSb();
+  if (!sb) return;
+
+  const { data: { session } } = await sb.auth.getSession();
+
+  if (!session) {
+    localStorage.removeItem("sb_access_token");
+    navigate("login");
+    return;
+  }
+
+  localStorage.setItem("sb_access_token", session.access_token);
+
+  navigate("home");
+  const userEmailEl = document.getElementById("user-email");
+  if (userEmailEl) userEmailEl.textContent = `Logged in as: ${session.user.email}`;
+}
+
+// =========================
+// ✅ AUTH FUNCTIONS (GLOBAL)
+// =========================
+async function registerUser() {
+  const sb = await getSb();
+  const errorEl = document.getElementById("register-error");
+  if (errorEl) errorEl.textContent = "";
+
+  if (!sb) {
+    if (errorEl) errorEl.textContent = "Supabase not initialized.";
+    return;
+  }
+
+  const firstName = document.getElementById("register-firstname").value.trim();
+  const lastName = document.getElementById("register-lastname").value.trim();
+  const phone = document.getElementById("register-phone").value.trim();
+  const email = document.getElementById("register-email").value.trim();
+  const password = document.getElementById("register-password").value;
+
+  const { error } = await sb.auth.signUp({
+    email,
+    password,
+    options: {
+      data: { first_name: firstName, last_name: lastName, phone },
+      emailRedirectTo: window.location.origin + "/callback",
+    },
+  });
+
+  if (error) {
+    if (errorEl) errorEl.textContent = error.message;
+    return;
+  }
+
+  alert("Registration successful! Check your email to confirm (if enabled).");
+  navigate("login");
+}
+
+async function login() {
+  const sb = await getSb();
+  const errorEl = document.getElementById("login-error");
+  if (errorEl) errorEl.textContent = "";
+
+  if (!sb) {
+    if (errorEl) errorEl.textContent = "Supabase not initialized.";
+    return;
+  }
+
+  const email = document.getElementById("login-email").value.trim();
+  const password = document.getElementById("login-password").value;
+
+  try {
+    const { data, error } = await sb.auth.signInWithPassword({ email, password });
+
+    if (error) {
+      console.error("Supabase login error:", error);
+      if (errorEl) errorEl.textContent = `${error.message}`;
+      return;
+    }
+
+    if (data?.session?.access_token) {
+      localStorage.setItem("sb_access_token", data.session.access_token);
+    }
+
+    await refreshUIForSession();
+  } catch (e) {
+    console.error("Unexpected login exception:", e);
+    if (errorEl) errorEl.textContent = "Unexpected login error. Check console.";
+  }
+}
+
+async function loginWithGoogle() {
+  const sb = await getSb();
+  const errorEl = document.getElementById("login-error");
+  if (errorEl) errorEl.textContent = "";
+
+  if (!sb) {
+    if (errorEl) errorEl.textContent = "Supabase not initialized.";
+    return;
+  }
+
+  const { error } = await sb.auth.signInWithOAuth({
+    provider: "google",
+    options: { redirectTo: window.location.origin + "/callback" },
+  });
+
+  if (error && errorEl) errorEl.textContent = error.message;
+}
+
+async function logout() {
+  const sb = await getSb();
+  if (sb) await sb.auth.signOut();
+
+  localStorage.removeItem("sb_access_token");
+  localStorage.removeItem("vm_id");
+  localStorage.removeItem("vm_ip");
+  navigate("login");
+}
+
+window.registerUser = registerUser;
+window.login = login;
+window.loginWithGoogle = loginWithGoogle;
+window.logout = logout;
+
+// =========================
+// ✅ Allocate page: Resume/New UI
+// =========================
+function setAllocateUIBusy(isBusy, msg = "") {
+  const allocateBtn = document.getElementById("allocate-btn");
+  const loadingText = document.getElementById("loading-text");
+  const statusMessage = document.getElementById("status-message");
+
+  if (allocateBtn) allocateBtn.disabled = !!isBusy;
+
+  if (loadingText) {
+    loadingText.style.display = isBusy ? "block" : "none";
+    if (msg) loadingText.textContent = msg;
+  }
+
+  if (statusMessage && msg) {
+    statusMessage.style.color = "white";
+    statusMessage.textContent = msg;
+  }
+}
+
+function renderStoppedVmChoices(vmInfo, accessToken) {
+  const statusMessage = document.getElementById("status-message");
+  const allocateBtn = document.getElementById("allocate-btn");
+  if (!statusMessage) return;
+
+  if (allocateBtn) allocateBtn.style.display = "none";
+
+  statusMessage.style.color = "white";
+  statusMessage.innerHTML = `
+    <div style="margin-top:10px;">
+      <div style="font-weight:bold;">🟡 You have an existing VM in STOPPED state.</div>
+      <div style="margin-top:6px;">VM ID: ${vmInfo.vm_id}</div>
+      <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
+        <button id="resume-vm-btn" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
+          Resume stopped instance
+        </button>
+        <button id="new-vm-btn" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
+          Create new instance (terminate old)
+        </button>
+      </div>
+      <div style="margin-top:10px; font-size:13px; opacity:0.95;">
+        Creating a new instance will terminate the old one and data will be lost permanently.
+      </div>
+    </div>
+  `;
+
+  const resumeBtn = document.getElementById("resume-vm-btn");
+  const newBtn = document.getElementById("new-vm-btn");
+
+  if (resumeBtn) {
+    resumeBtn.addEventListener("click", async () => {
+      try {
+        setAllocateUIBusy(true, "Resuming VM... Please wait.");
+        const resp = await fetch("${await apiBase()}/start_vm", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
+        });
+
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+        if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "Failed to start VM.");
+
+        localStorage.setItem("vm_id", data.vm_id);
+        localStorage.setItem("vm_ip", data.ip);
+
+        window.location.href = "/status";
+      } catch (e) {
+        statusMessage.style.color = "red";
+        statusMessage.textContent = `❌ Resume failed: ${e.message || e}`;
+        setAllocateUIBusy(false);
+      }
+    });
+  }
+
+  if (newBtn) {
+    newBtn.addEventListener("click", async () => {
+      const ok = confirm(
+        "Creating a new instance will TERMINATE your old instance and ALL data on it will be lost permanently. Continue?"
+      );
+      if (!ok) return;
+
+      try {
+        setAllocateUIBusy(true, "Terminating old VM...");
+        const termResp = await fetch("${await apiBase()}/terminate_vm", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
+        });
+
+        if (!termResp.ok) {
+          const t = await termResp.text();
+          throw new Error(t);
+        }
+
+        if (allocateBtn) {
+          allocateBtn.style.display = "inline-block";
+          allocateBtn.disabled = false;
+        }
+
+        statusMessage.style.color = "white";
+        statusMessage.textContent = "Old VM terminated. Now allocate a new instance.";
+        setAllocateUIBusy(false);
+
+      } catch (e) {
+        statusMessage.style.color = "red";
+        statusMessage.textContent = `❌ Could not terminate old VM: ${e.message || e}`;
+        setAllocateUIBusy(false);
+      }
+    });
+  }
+}
+
+async function checkExistingVmAndRenderChoices() {
+  const sb = await getSb();
+  const statusMessage = document.getElementById("status-message");
+  const allocateBtn = document.getElementById("allocate-btn");
+  if (!sb || !statusMessage || !allocateBtn) return;
+
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) return;
+
+    const accessToken = session.access_token;
+    localStorage.setItem("sb_access_token", accessToken);
+
+    const resp = await fetch("${await apiBase()}/my_vm", {
+      headers: { "Authorization": `Bearer ${accessToken}` }
+    });
+
+    const text = await resp.text();
+    let info;
+    try { info = JSON.parse(text); } catch { info = { raw: text }; }
+
+    if (!resp.ok) return;
+
+    if (!info.exists) {
+      allocateBtn.style.display = "inline-block";
+      return;
+    }
+
+    if (info.vm_id) localStorage.setItem("vm_id", info.vm_id);
+    if (info.ip) localStorage.setItem("vm_ip", info.ip);
+
+    if (info.state === "stopped" || info.state === "stopping") {
+      renderStoppedVmChoices(info, accessToken);
+      return;
+    }
+
+    if (info.state === "running" && info.ip) {
+      statusMessage.style.color = "white";
+      statusMessage.textContent = `✅ You already have a running VM (${info.ip}). Redirecting to dashboard...`;
+      setTimeout(() => (window.location.href = "/status"), 800);
+      return;
+    }
+
+    statusMessage.style.color = "white";
+    statusMessage.textContent = `ℹ️ Found existing VM (${info.state}).`;
+
+  } catch (e) {
+    console.warn("checkExistingVmAndRenderChoices failed:", e);
+  }
+}
+
+// =========================
+// ✅ ALLOCATE RAM (Protected)
+// =========================
+async function allocateRAM() {
+  const sb = await getSb();
+  const allocateBtn = document.getElementById("allocate-btn");
+  const loadingText = document.getElementById("loading-text");
+  const statusMessage = document.getElementById("status-message");
+  const ramSize = parseInt(document.getElementById("ram").value, 10);
+
+  allocateBtn.disabled = true;
+  loadingText.style.display = "block";
+  loadingText.style.color = "blue";
+  loadingText.textContent = "Processing... This may take 10-15 minutes.";
+  statusMessage.textContent = "";
+
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) throw new Error("Not logged in. Please login first.");
+
+    const accessToken = session.access_token;
+    localStorage.setItem("sb_access_token", accessToken);
+
+    const response = await fetch("${await apiBase()}/allocate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ ram_size: ramSize }),
+    });
+
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+    if (!response.ok) {
+      throw new Error(`Allocate failed: ${response.status} ${data.detail || data.raw || ""}`);
+    }
+
+    if (data.action_required) {
+      renderStoppedVmChoices({ vm_id: data.vm_id, state: data.state, ip: data.ip }, accessToken);
+      allocateBtn.disabled = false;
+      loadingText.style.display = "none";
+      return;
+    }
+
+    statusMessage.style.color = "white";
+    statusMessage.textContent = "RAM allocated successfully!";
+    localStorage.setItem("vm_ip", data.ip);
+    localStorage.setItem("vm_id", data.vm_id);
+
+    window.location.href = "/status";
+  } catch (err) {
+    statusMessage.style.color = "red";
+    statusMessage.textContent = err.message || "Allocation failed.";
+    allocateBtn.disabled = false;
+  } finally {
+    setTimeout(() => (loadingText.style.display = "none"), 2000);
+  }
+}
+
+// =========================
+// ✅ INIT
+// =========================
+document.addEventListener("DOMContentLoaded", async () => {
+  navigate("login", false);
+
+  const isSpa = document.getElementById("login-page") && document.getElementById("home-page");
+  if (!isSpa) return;
+
+  routeByPath();
+
+  const sb = await getSb();
+  if (!sb) return;
+
+  sb.auth.onAuthStateChange(async () => {
+    await refreshUIForSession();
+  });
+
+  await refreshUIForSession();
+
+  const allocateBtn = document.getElementById("allocate-btn");
+  if (allocateBtn) allocateBtn.addEventListener("click", allocateRAM);
+
+  if (window.location.pathname.toLowerCase() === "/allocate") {
+    await checkExistingVmAndRenderChoices();
+  }
+});
+
+window.addEventListener("popstate", () => routeByPath());
