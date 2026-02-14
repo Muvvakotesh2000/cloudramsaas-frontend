@@ -245,7 +245,8 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
     resumeBtn.addEventListener("click", async () => {
       try {
         setAllocateUIBusy(true, "Resuming VM... Please wait.");
-        const resp = await fetch("${await apiBase()}/start_vm", {
+            const base = await apiBase();
+            const resp = await fetch(`${base}/start_vm`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -281,7 +282,9 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
 
       try {
         setAllocateUIBusy(true, "Terminating old VM...");
-        const termResp = await fetch("${await apiBase()}/terminate_vm", {
+          const base = await apiBase();
+          const termResp = await fetch(`${base}/terminate_vm`, {
+
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -326,7 +329,9 @@ async function checkExistingVmAndRenderChoices() {
     const accessToken = session.access_token;
     localStorage.setItem("sb_access_token", accessToken);
 
-    const resp = await fetch("${await apiBase()}/my_vm", {
+    const base = await apiBase();
+    const resp = await fetch(`${base}/my_vm`, {
+
       headers: { "Authorization": `Bearer ${accessToken}` }
     });
 
@@ -387,7 +392,8 @@ async function allocateRAM() {
     const accessToken = session.access_token;
     localStorage.setItem("sb_access_token", accessToken);
 
-    const response = await fetch("${await apiBase()}/allocate", {
+    const base = await apiBase();
+    const response = await fetch(`${base}/allocate`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

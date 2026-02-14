@@ -139,7 +139,8 @@
         if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
         vmIp = info.ip;
 
-        const resp = await fetch("${await apiBase()}/save_project_to_local", {
+        const base = await apiBase();
+        const resp = await fetch(`${base}/save_project_to_local`, {
           method: "POST",
           headers: { ...headers, "Content-Type": "application/json" },
           body: JSON.stringify({ vm_ip: vmIp, project_name })
@@ -170,7 +171,8 @@
       const headers = await window.getAuthHeaders();
 
       for (let i = 1; i <= maxTries; i++) {
-        const resp = await fetch("${await apiBase()}/my_vm", { headers });
+        const resp = await fetch(`${base}/my_vm`, { headers });
+
         const text = await resp.text();
         let info;
         try { info = JSON.parse(text); } catch { info = { raw: text }; }
@@ -274,7 +276,8 @@
         const vm_id = localStorage.getItem("vm_id");
         if (!vm_id) throw new Error("No vm_id found in localStorage.");
 
-        const resp = await fetch("${await apiBase()}/stop_vm", {
+        const base = await apiBase();
+        const resp = await fetch(`${base}/stop_vm`, {
           method: "POST",
           headers: { ...headers, "Content-Type": "application/json" },
           body: JSON.stringify({ vm_id })
@@ -397,7 +400,9 @@
 
         const headers = await window.getAuthHeaders();
 
-        const response = await fetch("${await apiBase()}/migrate_tasks/", {
+        const base = await apiBase();
+        const resp = await fetch(`${base}/migrate_tasks/`, {
+
           method: "POST",
           headers: { ...headers, "Content-Type": "application/json" },
           body: JSON.stringify({ task_names, vm_ip: vmIp })
@@ -446,7 +451,8 @@
 
     const headers = await window.getAuthHeaders();
 
-    const resp = await fetch("${await apiBase()}/migrate_vscode/", {
+    const base = await apiBase();
+    const resp = await fetch(`${base}/migrate_vscode/`, {
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json" },
     body: JSON.stringify({ vm_ip: vmIp })
