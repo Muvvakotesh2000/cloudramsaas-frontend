@@ -15,6 +15,9 @@ function agentBase() {
   return "http://127.0.0.1:7071";
 }
 
+const AGENT_ZIP_URL =
+  "https://github.com/Muvvakotesh2000/cloudramsaas-LocalAgent/archive/refs/heads/main.zip";
+
 // Small helper: fetch JSON + good errors
 async function fetchJson(url, opts = {}) {
   const r = await fetch(url, opts);
@@ -34,10 +37,85 @@ async function fetchJson(url, opts = {}) {
 // Check if Local Agent is running
 async function isAgentOnline() {
   try {
-    await fetchJson(`${agentBase()}/health`);
-    return true;
+    const r = await fetch(`${agentBase()}/health`, { cache: "no-store" });
+    return r.ok;
   } catch {
     return false;
+  }
+}
+
+// ==================================================
+// ✅ ALLOCATE PAGE: Local Agent Gate + Copy Commands
+// ==================================================
+function buildInstallCommand() {
+  return [
+    '$ErrorActionPreference="Stop"',
+    '$dest="C:\\CloudRAMS\\LocalAgent"',
+    'New-Item -ItemType Directory -Force -Path $dest | Out-Null',
+    'Write-Host "Downloading LocalAgent zip..."',
+    `Invoke-WebRequest -Uri "${AGENT_ZIP_URL}" -OutFile "$env:TEMP\\LocalAgent.zip"`,
+    'Write-Host "Extracting..."',
+    'Expand-Archive -Path "$env:TEMP\\LocalAgent.zip" -DestinationPath $dest -Force',
+    // GitHub zip contains a root folder like cloudramsaas-LocalAgent-main
+    '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
+    'if (-not $root) { throw "Could not find extracted folder inside destination." }',
+    'Set-Location $root.FullName',
+    'Write-Host "Creating venv..."',
+    'python -m venv .venv',
+    'Write-Host "Installing requirements..."',
+    '.\\.venv\\Scripts\\pip.exe install -r requirements.txt',
+    'Write-Host "✅ Install complete. Next: run the agent."'
+  ].join(" ; ");
+}
+
+function buildRunCommand() {
+  return [
+    '$ErrorActionPreference="Stop"',
+    '$dest="C:\\CloudRAMS\\LocalAgent"',
+    '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
+    'if (-not $root) { throw "Agent folder not found. Run install first." }',
+    'Set-Location $root.FullName',
+    '.\\.venv\\Scripts\\python.exe agent_main.py'
+  ].join(" ; ");
+}
+
+function buildAutoStartCommand() {
+  return [
+    '$ErrorActionPreference="Stop"',
+    '$dest="C:\\CloudRAMS\\LocalAgent"',
+    '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
+    'if (-not $root) { throw "Agent folder not found. Run install first." }',
+    '$py="$($root.FullName)\\.venv\\Scripts\\python.exe"',
+    '$script="$($root.FullName)\\agent_main.py"',
+    'schtasks /Create /TN "CloudRAMS-LocalAgent" /TR "`"$py`" `"$script`"" /SC ONLOGON /RL HIGHEST /F',
+    'Write-Host "✅ Auto-start scheduled task created: CloudRAMS-LocalAgent"'
+  ].join(" ; ");
+}
+
+function setAllocateGateUI({ ok, msg }) {
+  const statusEl = document.getElementById("allocate-agent-status");
+  const allocateBtn = document.getElementById("allocate-btn");
+
+  if (statusEl) {
+    statusEl.textContent = msg || "";
+    statusEl.style.color = ok ? "lightgreen" : "crimson";
+  }
+
+  if (allocateBtn) allocateBtn.disabled = !ok;
+}
+
+async function enforceAgentGateOnAllocate() {
+  const panel = document.getElementById("allocate-agent-panel");
+  if (!panel) return;
+
+  const ok = await isAgentOnline();
+  if (ok) {
+    setAllocateGateUI({ ok: true, msg: "✅ Local Agent is running. You can allocate RAM." });
+  } else {
+    setAllocateGateUI({
+      ok: false,
+      msg: "❌ Local Agent is NOT running. Install + run it, then click Retry."
+    });
   }
 }
 
@@ -69,7 +147,10 @@ function navigate(page, pushState = true) {
   }
 
   if (page === "allocate") {
-    setTimeout(() => checkExistingVmAndRenderChoices(), 0);
+    setTimeout(async () => {
+      await enforceAgentGateOnAllocate();      // ✅ gate allocate
+      await checkExistingVmAndRenderChoices(); // existing VM logic
+    }, 0);
   }
 }
 
@@ -410,11 +491,9 @@ async function allocateRAM() {
     const accessToken = session.access_token;
     localStorage.setItem("sb_access_token", accessToken);
 
-    // ✅ Enforce Local Agent for public-safe architecture
+    // ✅ Enforce Local Agent
     const agentOk = await isAgentOnline();
-    if (!agentOk) {
-      throw new Error("Local Agent is not running. Start the agent (http://127.0.0.1:7071) and try again.");
-    }
+    if (!agentOk) throw new Error("Local Agent is not running. Start it and Retry.");
 
     const base = await apiBase();
     const data = await fetchJson(`${base}/allocate`, {
@@ -468,10 +547,50 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await refreshUIForSession();
 
+  // Allocate click
   const allocateBtn = document.getElementById("allocate-btn");
   if (allocateBtn) allocateBtn.addEventListener("click", allocateRAM);
 
+  // Allocate page: wire agent gate buttons
+  const retry = document.getElementById("allocate-agent-retry");
+  if (retry) retry.addEventListener("click", enforceAgentGateOnAllocate);
+
+  const ci = document.getElementById("allocate-copy-install");
+  if (ci) ci.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(buildInstallCommand());
+      setAllocateGateUI({ ok: false, msg: "📋 Install command copied. Paste into PowerShell and run once." });
+    } catch {
+      setAllocateGateUI({ ok: false, msg: "❌ Could not copy. Open console for command." });
+      console.log("INSTALL CMD:\n", buildInstallCommand());
+    }
+  });
+
+  const cr = document.getElementById("allocate-copy-run");
+  if (cr) cr.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(buildRunCommand());
+      setAllocateGateUI({ ok: false, msg: "📋 Run command copied. Paste into PowerShell to start the agent." });
+    } catch {
+      setAllocateGateUI({ ok: false, msg: "❌ Could not copy. Open console for command." });
+      console.log("RUN CMD:\n", buildRunCommand());
+    }
+  });
+
+  const ca = document.getElementById("allocate-copy-autostart");
+  if (ca) ca.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(buildAutoStartCommand());
+      setAllocateGateUI({ ok: false, msg: "📋 Auto-start command copied. Paste into PowerShell to run agent on login." });
+    } catch {
+      setAllocateGateUI({ ok: false, msg: "❌ Could not copy. Open console for command." });
+      console.log("AUTOSTART CMD:\n", buildAutoStartCommand());
+    }
+  });
+
+  // If user lands directly on /allocate
   if (window.location.pathname.toLowerCase() === "/allocate") {
+    await enforceAgentGateOnAllocate();
     await checkExistingVmAndRenderChoices();
   }
 });

@@ -11,7 +11,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
   <!-- ✅ Your SPA logic -->
-   <script src="/static/config.js" defer></script>
+  <script src="/static/config.js" defer></script>
   <script src="/static/script.js" defer></script>
 </head>
 
@@ -30,15 +30,15 @@
       <form onsubmit="event.preventDefault(); login();">
         <div>
           <label>Email:</label>
-          <input type="email" id="login-email" required />
+          <input type="email" id="login-email" required autocomplete="email" />
         </div>
 
         <div>
           <label>Password:</label>
-          <input type="password" id="login-password" required />
+          <input type="password" id="login-password" required autocomplete="current-password" />
         </div>
 
-    <button type="button" onclick="login()">Login</button>
+        <button type="button" onclick="login()">Login</button>
       </form>
 
       <button onclick="navigate('register')">Register</button>
@@ -54,27 +54,27 @@
       <form onsubmit="event.preventDefault(); registerUser();">
         <div>
           <label>First Name:</label>
-          <input type="text" id="register-firstname" required />
+          <input type="text" id="register-firstname" required autocomplete="given-name" />
         </div>
 
         <div>
           <label>Last Name:</label>
-          <input type="text" id="register-lastname" required />
+          <input type="text" id="register-lastname" required autocomplete="family-name" />
         </div>
 
         <div>
           <label>Phone Number:</label>
-          <input type="tel" id="register-phone" required />
+          <input type="tel" id="register-phone" required autocomplete="tel" />
         </div>
 
         <div>
           <label>Email:</label>
-          <input type="email" id="register-email" required />
+          <input type="email" id="register-email" required autocomplete="email" />
         </div>
 
         <div>
           <label>Password:</label>
-          <input type="password" id="register-password" required />
+          <input type="password" id="register-password" required autocomplete="new-password" />
         </div>
 
         <button type="submit">Register</button>
@@ -100,6 +100,35 @@
         <li>Once you create RAM, it will be terminated if you close the browser tab.</li>
       </ul>
 
+      <!-- ✅ Local Agent Gate (Allocate Page) -->
+      <div id="allocate-agent-panel" style="margin:14px 0; padding:14px; border-radius:10px; background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.20);">
+        <div style="font-weight:bold; font-size:16px;">Local Agent Required</div>
+        <div style="margin-top:6px; font-size:13px; opacity:0.9;">
+          You must run the Local Agent on this computer before allocating RAM.
+          This enables secure task discovery and local sync.
+        </div>
+
+        <div id="allocate-agent-status" style="margin-top:10px; font-weight:bold;"></div>
+
+        <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
+          <a class="button"
+             id="allocate-agent-download"
+             href="https://github.com/Muvvakotesh2000/cloudramsaas-LocalAgent/archive/refs/heads/main.zip"
+             target="_blank" rel="noopener">
+            Download Agent (ZIP)
+          </a>
+
+          <button class="button" id="allocate-copy-install" type="button">Copy Install Command</button>
+          <button class="button" id="allocate-copy-run" type="button">Copy Run Command</button>
+          <button class="button" id="allocate-copy-autostart" type="button">Copy Auto-Start Command</button>
+          <button class="button" id="allocate-agent-retry" type="button">Retry Agent</button>
+        </div>
+
+        <div style="margin-top:10px; font-size:13px; opacity:0.9;">
+          Health check: <code>http://127.0.0.1:7071/health</code>
+        </div>
+      </div>
+
       <label>Choose RAM:</label>
       <select id="ram">
         <option value="1">1 GB</option>
@@ -107,7 +136,9 @@
         <option value="4">4 GB</option>
       </select>
 
-      <button id="allocate-btn" type="button">Allocate</button>
+      <!-- ✅ disabled until agent is running -->
+      <button id="allocate-btn" type="button" disabled>Allocate</button>
+
       <p id="loading-text" style="display:none; color:blue;">Processing...</p>
       <p id="status-message"></p>
     </div>

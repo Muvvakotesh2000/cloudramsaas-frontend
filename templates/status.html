@@ -75,52 +75,6 @@
   <h1>Cloud RAM Dashboard</h1>
   <div id="status-text">Loading...</div>
 
-    <!-- ✅ Local Agent Panel -->
-  <div id="agent-panel" class="panel" style="display:none;">
-    <div style="font-weight:bold; font-size:16px;">Local Agent Required</div>
-    <div class="muted" style="margin-top:6px;">
-      This app uses a Local Agent on your PC for secure task discovery and local file sync.
-      The browser cannot install or start it automatically — you’ll do a one-time setup.
-    </div>
-
-    <div id="agent-status" style="margin-top:10px; font-weight:bold;"></div>
-
-    <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
-      <a id="agent-download" class="button"
-        href="https://github.com/Muvvakotesh2000/cloudramsaas-LocalAgent/archive/refs/heads/main.zip"
-        target="_blank" rel="noopener">
-        Download Agent (ZIP)
-      </a>
-      <button id="copy-install-cmd" class="button">Copy Install Command</button>
-      <button id="copy-run-cmd" class="button">Copy Run Command</button>
-      <button id="retry-agent" class="button">Retry</button>
-      <button id="copy-autostart-cmd" class="button">Copy Auto-Start Command</button>
-    </div>
-
-    <!-- ✅ Instructions -->
-    <div class="panel" style="margin-top:12px;">
-      <div style="font-weight:bold;">Windows Setup (One Time)</div>
-      <ol class="muted" style="margin-top:8px; line-height:1.5;">
-        <li>Click <b>Download Agent (ZIP)</b></li>
-        <li>Extract the ZIP anywhere (recommended): <code>C:\CloudRAMS\LocalAgent</code></li>
-        <li>Open PowerShell in that folder</li>
-        <li>Run the install command (installs dependencies)</li>
-        <li>Run the agent</li>
-        <li>Confirm it’s running by opening: <code>http://127.0.0.1:7071/health</code></li>
-        <li>Come back here and click <b>Retry</b></li>
-      </ol>
-
-      <div class="muted" style="margin-top:10px;">
-        ✅ Expected: health returns something like <code>{"status":"ok"}</code> and tasks can load.
-      </div>
-    </div>
-
-    <div class="muted" style="margin-top:10px;">
-      Health check endpoint: <code>http://127.0.0.1:7071/health</code>
-    </div>
-  </div>
-
-
   <div style="margin-top:12px;">
     <button class="button danger" id="stop-vm-btn">Stop VM</button>
     <span id="stop-spinner" style="display:none;" class="spinner"></span>
@@ -158,63 +112,7 @@
     let vmIp = null;
     let vmId = null;
 
-    // ========= Local Agent config =========
-    // ========= Local Agent config =========
-    const AGENT_BASE = "http://127.0.0.1:7071";
-    const AGENT_ZIP_URL = "https://github.com/Muvvakotesh2000/cloudramsaas-LocalAgent/archive/refs/heads/main.zip";
-
-
-    function buildAutoStartCommand() {
-    // Creates a Scheduled Task to start the agent on user login (Windows)
-    return [
-      '$ErrorActionPreference="Stop"',
-      '$dest="C:\\CloudRAMS\\LocalAgent"',
-      '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
-      'if (-not $root) { throw "Agent folder not found. Run install first." }',
-      '$py="$($root.FullName)\\.venv\\Scripts\\python.exe"',
-      '$script="$($root.FullName)\\agent_main.py"',
-      'schtasks /Create /TN "CloudRAMS-LocalAgent" /TR "`"$py`" `"$script`"" /SC ONLOGON /RL HIGHEST /F',
-      'Write-Host "✅ Auto-start scheduled task created: CloudRAMS-LocalAgent"'
-    ].join(" ; ");
-  }
-
-
-    // One-time install command (user copies & runs in PowerShell)
-    // Replace with your real command. Example uses a downloaded installer.
-      function buildInstallCommand() {
-    // This installs the agent into C:\CloudRAMS\LocalAgent (recommended).
-    return [
-      '$ErrorActionPreference="Stop"',
-      '$dest="C:\\CloudRAMS\\LocalAgent"',
-      'New-Item -ItemType Directory -Force -Path $dest | Out-Null',
-      'Write-Host "Downloading LocalAgent zip..."',
-      `Invoke-WebRequest -Uri "${AGENT_ZIP_URL}" -OutFile "$env:TEMP\\LocalAgent.zip"`,
-      'Write-Host "Extracting..."',
-      'Expand-Archive -Path "$env:TEMP\\LocalAgent.zip" -DestinationPath $dest -Force',
-      // GitHub zip contains a root folder like cloudramsaas-LocalAgent-main
-      '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
-      'if (-not $root) { throw "Could not find extracted folder inside destination." }',
-      'Set-Location $root.FullName',
-      'Write-Host "Creating venv..."',
-      'python -m venv .venv',
-      'Write-Host "Installing requirements..."',
-      '.\\.venv\\Scripts\\pip.exe install -r requirements.txt',
-      'Write-Host "Install complete. Next: run the agent."'
-    ].join(" ; ");
-  }
-
-    function buildRunCommand() {
-    return [
-      '$ErrorActionPreference="Stop"',
-      '$dest="C:\\CloudRAMS\\LocalAgent"',
-      '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
-      'if (-not $root) { throw "Agent folder not found. Run install first." }',
-      'Set-Location $root.FullName',
-      '.\\.venv\\Scripts\\python.exe agent_main.py'
-    ].join(" ; ");
-  }
-
-
+    
     // ========= Helpers =========
     async function apiBase() {
       const cfg = await window.loadAppConfig();
@@ -230,41 +128,6 @@
       return data;
     }
 
-    async function isAgentOnline() {
-      try {
-        await fetchJson(`${AGENT_BASE}/health`);
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
-    function showAgentPanel(show, message = "", ok = false) {
-      const panel = document.getElementById("agent-panel");
-      const status = document.getElementById("agent-status");
-      if (!panel || !status) return;
-
-      panel.style.display = show ? "block" : "none";
-      if (message) {
-        status.textContent = message;
-        status.className = ok ? "ok" : "bad";
-      }
-    }
-
-      async function ensureAgentOrShowHelp() {
-    const online = await isAgentOnline();
-    if (online) {
-      showAgentPanel(false);
-      return true;
-    }
-
-    const dl = document.getElementById("agent-download");
-    if (dl) dl.href = AGENT_ZIP_URL;
-
-    showAgentPanel(true, "❌ Local Agent is not running. Please install/start it, then click Retry.", false);
-    return false;
-  }
-
     // ========= Dashboard init =========
     document.addEventListener("DOMContentLoaded", async () => {
       const stopBtn = document.getElementById("stop-vm-btn");
@@ -278,50 +141,6 @@
 
       const saveBtn = document.getElementById("save-local-btn");
       if (saveBtn) saveBtn.addEventListener("click", saveProjectToLocal);
-
-      const retryBtn = document.getElementById("retry-agent");
-      if (retryBtn) retryBtn.addEventListener("click", async () => {
-        const ok = await ensureAgentOrShowHelp();
-        if (ok) {
-          showAgentPanel(false, "", true);
-          // If agent is up now, refresh tasks (depends on your design)
-          fetchLocalTasksViaAgent();
-        }
-      });
-
-      const copyBtn = document.getElementById("copy-install-cmd");
-      if (copyBtn) copyBtn.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(buildInstallCommand());
-          showAgentPanel(true, "✅ Install command copied. Paste into PowerShell and run once.", true);
-        } catch {
-          showAgentPanel(true, "❌ Could not copy. Copy manually from console (see DevTools).", false);
-          console.log("INSTALL CMD:\n", buildInstallCommand());
-        }
-      });
-
-      const copyAutoBtn = document.getElementById("copy-autostart-cmd");
-      if (copyAutoBtn) copyAutoBtn.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(buildAutoStartCommand());
-          showAgentPanel(true, "✅ Auto-start command copied. Paste into PowerShell to enable start-on-login.", true);
-        } catch {
-          showAgentPanel(true, "❌ Could not copy. Copy manually from console (see DevTools).", false);
-          console.log("AUTOSTART CMD:\n", buildAutoStartCommand());
-        }
-      });
-
-      const copyRunBtn = document.getElementById("copy-run-cmd");
-      if (copyRunBtn) copyRunBtn.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(buildRunCommand());
-          showAgentPanel(true, "✅ Run command copied. Paste into PowerShell to start the agent.", true);
-        } catch {
-          showAgentPanel(true, "❌ Could not copy. Copy manually from console (see DevTools).", false);
-          console.log("RUN CMD:\n", buildRunCommand());
-        }
-      });
-
 
       // start dashboard load
       await initDashboard();
@@ -398,15 +217,15 @@
         await fetchRamUsage();
 
         // Agent-dependent task discovery
-        const agentOk = await ensureAgentOrShowHelp();
+        const agentOk = await isAgentOnline();
         if (agentOk) {
-          // Recommended: tasks from local agent (not from Render backend)
           fetchLocalTasksViaAgent();
         } else {
-          // If you still want fallback server tasks, you can call it here (optional)
-          // fetchServerSideTasksFallback();
+          // show a message somewhere (or just leave tasks empty)
+          document.getElementById("task-loading").style.color = "crimson";
+          document.getElementById("task-loading").innerText =
+            "❌ Local Agent not running. Start it to load tasks.";
         }
-
       } catch (e) {
         console.error("initDashboard failed:", e);
         document.getElementById("status-text").innerHTML = `❌ ${e.message || e}`;
