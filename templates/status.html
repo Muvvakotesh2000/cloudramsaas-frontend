@@ -210,27 +210,23 @@
           return;
         }
 
-        // Load VNC first (best UX)
+        // Load VNC first
         loadVncGui();
 
-        // Then load RAM + tasks
+        // Then RAM usage
         await fetchRamUsage();
 
-        // Agent-dependent task discovery
-        const agentOk = await isAgentOnline();
-        if (agentOk) {
-          fetchLocalTasksViaAgent();
-        } else {
-          // show a message somewhere (or just leave tasks empty)
-          document.getElementById("task-loading").style.color = "crimson";
-          document.getElementById("task-loading").innerText =
-            "❌ Local Agent not running. Start it to load tasks.";
-        }
+        // Load local tasks via agent
+        await fetchLocalTasksViaAgent();
+
       } catch (e) {
         console.error("initDashboard failed:", e);
-        document.getElementById("status-text").innerHTML = `❌ ${e.message || e}`;
+        document.getElementById("status-text").innerHTML =
+          `❌ ${e.message || e}`;
       }
     }
+
+    
 
     async function fetchRamUsage() {
       const headers = await window.getAuthHeaders();
@@ -307,38 +303,40 @@
       taskList.innerHTML = "";
       taskArray = [];
 
-      try {
-        const data = await fetchJson(`${AGENT_BASE}/running_tasks`);
+      fetch("http://127.0.0.1:8000/running_tasks/")
+              .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+              })
+              .then(data => {
+                loadingText.style.display = "none";
 
-        loadingText.style.display = "none";
+                if (!data.tasks || data.tasks.length === 0) {
+                  taskList.innerHTML = "<option>No running tasks found</option>";
+                  return;
+                }
 
-        if (!data.tasks || data.tasks.length === 0) {
-          taskList.innerHTML = "<option>No running tasks found</option>";
-          return;
-        }
+                data.tasks.forEach(task => {
+                  if (['notepad++.exe', 'chrome.exe', 'Code.exe'].includes(task.name)) {
+                    taskArray.push({ pid: task.pid, name: task.name });
+                  }
+                });
 
-        data.tasks.forEach(task => {
-          if (['notepad++.exe', 'chrome.exe', 'Code.exe'].includes(task.name)) {
-            taskArray.push({ pid: task.pid, name: task.name });
+                const hasVSCode = (data.tasks || []).some(t => (t.name || "").toLowerCase() === "code.exe");
+                document.getElementById("migrate-vscode-btn").style.display = hasVSCode ? "inline-block" : "none";
+
+
+                populateDropdown();
+                loadingText.style.display = "block";
+                loadingText.innerText = `${taskArray.length} tasks fetched.`;
+              })
+              .catch(err => {
+                console.error("❌ Error fetching local tasks:", err);
+                loadingText.style.display = "block";
+                loadingText.style.color = "crimson";
+                loadingText.innerText = `❌ Failed to fetch tasks: ${err.message || err}`;
+              });
           }
-        });
-
-        const hasVSCode = (data.tasks || []).some(t => (t.name || "").toLowerCase() === "code.exe");
-        document.getElementById("migrate-vscode-btn").style.display = hasVSCode ? "inline-block" : "none";
-
-        populateDropdown();
-        loadingText.style.display = "block";
-        loadingText.innerText = `${taskArray.length} tasks fetched.`;
-
-      } catch (err) {
-        console.error("❌ Agent task fetch failed:", err);
-        loadingText.style.display = "block";
-        loadingText.style.color = "crimson";
-        loadingText.innerText = `❌ Failed to fetch tasks from Agent: ${err.message || err}`;
-        // Show panel again if agent is down
-        showAgentPanel(true, "❌ Agent is not responding. Start it and click Retry.", false);
-      }
-    }
 
     function populateDropdown() {
       const taskList = document.getElementById("tasks");
