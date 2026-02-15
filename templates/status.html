@@ -102,9 +102,8 @@
 
   <h2>VM GUI (VNC)</h2>
   <div id="vnc-container">
-    <p id="vnc-loading">Loading VM GUI...</p>
-    <iframe id="vnc-iframe" style="display: none;"></iframe>
-    <button class="button" onclick="toggleFullscreen()" style="margin-top: 10px;">Toggle Fullscreen</button>
+    <p id="vnc-loading">VNC ready.</p>
+    <a id="vnc-link" class="button" target="_blank" rel="noopener" style="display:none;">Open VM GUI (VNC)</a>
   </div>
 
   <script>
@@ -303,7 +302,7 @@
       taskList.innerHTML = "";
       taskArray = [];
 
-      fetch("http://127.0.0.1:8000/running_tasks/")
+      fetch("http://127.0.0.1:7071/running_tasks/")
               .then(r => {
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 return r.json();
@@ -519,27 +518,22 @@
     // ✅ VNC iframe uses vmIp
     // ---------------------------
     function loadVncGui() {
+      const loading = document.getElementById("vnc-loading");
+      const link = document.getElementById("vnc-link");
+
       if (!vmIp) {
-        document.getElementById("vnc-loading").innerText =
-          "❌ No VM IP found. Please ensure Cloud RAM is running.";
+        loading.style.color = "crimson";
+        loading.innerText = "❌ No VM IP found.";
         return;
       }
 
       const vncUrl = `http://${vmIp}:8080/vnc.html?autoconnect=true&resize=scale`;
-      const iframe = document.getElementById("vnc-iframe");
-      const loading = document.getElementById("vnc-loading");
 
-      iframe.src = vncUrl;
+      loading.style.color = "lightgreen";
+      loading.innerText = "✅ VNC available (opens in new tab).";
 
-      iframe.onload = () => {
-        loading.style.display = "none";
-        iframe.style.display = "block";
-      };
-
-      iframe.onerror = () => {
-        loading.style.color = "crimson";
-        loading.innerText = "❌ Failed to load VM GUI inside iframe. Try opening VNC in a new tab.";
-      };
+      link.href = vncUrl;
+      link.style.display = "inline-block";
     }
 
     function toggleFullscreen() {
