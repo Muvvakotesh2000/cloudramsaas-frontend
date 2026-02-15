@@ -8,7 +8,6 @@
   <script src="/static/config.js" defer></script>
   <script src="/static/status_auth.js?v=6" defer></script>
 
-
   <style>
     body {
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -52,12 +51,55 @@
 
     iframe { width: 100%; height: 500px; border: none; }
     #tasks { min-width: 320px; min-height: 140px; }
+
+    .panel {
+      width: min(920px, 95vw);
+      background: rgba(255,255,255,0.10);
+      border: 1px solid rgba(255,255,255,0.20);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-top: 12px;
+    }
+    .muted { opacity: 0.9; font-size: 13px; }
+    .ok { color: lightgreen; }
+    .bad { color: #ffb3b3; }
+    code {
+      background: rgba(0,0,0,0.25);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
   </style>
 </head>
 
 <body>
   <h1>Cloud RAM Dashboard</h1>
   <div id="status-text">Loading...</div>
+
+  <!-- ✅ Local Agent Panel -->
+  <div id="agent-panel" class="panel" style="display:none;">
+    <div style="font-weight:bold; font-size:16px;">Local Agent Required</div>
+    <div class="muted" style="margin-top:6px;">
+      This app uses a Local Agent on your PC for secure task discovery and local file sync.
+      The browser cannot install or start it automatically — you’ll do a one-time setup.
+    </div>
+
+    <div id="agent-status" style="margin-top:10px; font-weight:bold;"></div>
+
+    <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
+      <a id="agent-download" class="button" href="#" target="_blank" rel="noopener">Download Agent</a>
+      <button id="copy-install-cmd" class="button">Copy Install Command</button>
+      <button id="retry-agent" class="button">Retry</button>
+    </div>
+
+    <div class="muted" style="margin-top:10px;">
+      After install, the agent should run automatically on login.
+      If you just installed it, wait ~5 seconds and click <b>Retry</b>.
+    </div>
+
+    <div class="muted" style="margin-top:10px;">
+      Health check endpoint: <code>http://127.0.0.1:7071/health</code>
+    </div>
+  </div>
 
   <div style="margin-top:12px;">
     <button class="button danger" id="stop-vm-btn">Stop VM</button>
@@ -73,9 +115,11 @@
       <button class="button" id="migrate-btn">Migrate Selected Tasks</button>
       <span id="migration-spinner" style="display:none;" class="spinner"></span>
       <p id="migration-status" style="margin-top: 10px; font-weight: bold;"></p>
+
       <button class="button" id="migrate-vscode-btn" style="display:none;">Migrate VSCode Project</button>
       <span id="vscode-spinner" style="display:none;" class="spinner"></span>
       <p id="vscode-status" style="margin-top: 10px; font-weight: bold;"></p>
+
       <button class="button" id="save-local-btn">Save Project to Local</button>
       <span id="save-local-spinner" style="display:none;" class="spinner"></span>
       <p id="save-local-status" style="margin-top: 10px; font-weight: bold;"></p>
@@ -94,7 +138,79 @@
     let vmIp = null;
     let vmId = null;
 
-    document.addEventListener("DOMContentLoaded", () => {
+    // ========= Local Agent config =========
+    const AGENT_BASE = "http://127.0.0.1:7071";
+    // Host your agent installer somewhere you control (backend/static/S3/etc)
+    const AGENT_INSTALL_URL = "/static/agent/CloudRAMS-Agent-Setup.exe"; // <-- change if needed
+
+    // One-time install command (user copies & runs in PowerShell)
+    // Replace with your real command. Example uses a downloaded installer.
+    function buildInstallCommand() {
+      // This is an example. Adjust file name and args as needed.
+      // You can also host a .ps1 script and use iwr to download and execute.
+      return [
+        '$ErrorActionPreference="Stop"',
+        'Write-Host "Downloading CloudRAMS Local Agent installer..."',
+        `Invoke-WebRequest -Uri "${window.location.origin}${AGENT_INSTALL_URL}" -OutFile "$env:TEMP\\CloudRAMS-Agent-Setup.exe"`,
+        'Write-Host "Running installer..."',
+        'Start-Process "$env:TEMP\\CloudRAMS-Agent-Setup.exe" -ArgumentList "/S" -Wait',
+        'Write-Host "Done. The agent should start automatically."'
+      ].join(" ; ");
+    }
+
+    // ========= Helpers =========
+    async function apiBase() {
+      const cfg = await window.loadAppConfig();
+      return (cfg.API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
+    }
+
+    async function fetchJson(url, opts = {}) {
+      const r = await fetch(url, opts);
+      const text = await r.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      if (!r.ok) throw new Error(data.detail || data.error || data.raw || `HTTP ${r.status}`);
+      return data;
+    }
+
+    async function isAgentOnline() {
+      try {
+        await fetchJson(`${AGENT_BASE}/health`);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    function showAgentPanel(show, message = "", ok = false) {
+      const panel = document.getElementById("agent-panel");
+      const status = document.getElementById("agent-status");
+      if (!panel || !status) return;
+
+      panel.style.display = show ? "block" : "none";
+      if (message) {
+        status.textContent = message;
+        status.className = ok ? "ok" : "bad";
+      }
+    }
+
+    async function ensureAgentOrShowHelp() {
+      const online = await isAgentOnline();
+      if (online) {
+        showAgentPanel(false);
+        return true;
+      }
+
+      // Show panel with setup actions
+      const dl = document.getElementById("agent-download");
+      if (dl) dl.href = AGENT_INSTALL_URL;
+
+      showAgentPanel(true, "❌ Local Agent is not running. Please install/start it, then click Retry.", false);
+      return false;
+    }
+
+    // ========= Dashboard init =========
+    document.addEventListener("DOMContentLoaded", async () => {
       const stopBtn = document.getElementById("stop-vm-btn");
       if (stopBtn) stopBtn.addEventListener("click", stopVmNow);
 
@@ -107,68 +223,37 @@
       const saveBtn = document.getElementById("save-local-btn");
       if (saveBtn) saveBtn.addEventListener("click", saveProjectToLocal);
 
+      const retryBtn = document.getElementById("retry-agent");
+      if (retryBtn) retryBtn.addEventListener("click", async () => {
+        const ok = await ensureAgentOrShowHelp();
+        if (ok) {
+          showAgentPanel(false, "", true);
+          // If agent is up now, refresh tasks (depends on your design)
+          fetchLocalTasksViaAgent();
+        }
+      });
+
+      const copyBtn = document.getElementById("copy-install-cmd");
+      if (copyBtn) copyBtn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(buildInstallCommand());
+          showAgentPanel(true, "✅ Install command copied. Paste into PowerShell and run once.", true);
+        } catch {
+          showAgentPanel(true, "❌ Could not copy. Copy manually from console (see DevTools).", false);
+          console.log("INSTALL CMD:\n", buildInstallCommand());
+        }
+      });
 
       // start dashboard load
-      initDashboard();
+      await initDashboard();
     });
 
-    async function apiBase() {
-      const cfg = await window.loadAppConfig();
-      return (cfg.API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
-    }
-
-    async function saveProjectToLocal() {
-      const btn = document.getElementById("save-local-btn");
-      const spinner = document.getElementById("save-local-spinner");
-      const statusEl = document.getElementById("save-local-status");
-
-      try {
-        spinner.style.display = "inline-block";
-        btn.disabled = true;
-        statusEl.style.color = "white";
-        statusEl.textContent = "";
-
-        const headers = await window.getAuthHeaders();
-
-        // you must send which project to save
-        // simplest: prompt user for name
-        const project_name = prompt("Enter project folder name to save (example: CloudRAMSaaS):");
-        if (!project_name) return;
-
-        const info = await fetchMyVmWithRetries(6, 3000);
-        if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
-        vmIp = info.ip;
-
-        const base = await apiBase();
-        const resp = await fetch(`${base}/save_project_to_local`, {
-          method: "POST",
-          headers: { ...headers, "Content-Type": "application/json" },
-          body: JSON.stringify({ vm_ip: vmIp, project_name })
-        });
-
-        const text = await resp.text();
-        let data;
-        try { data = JSON.parse(text); } catch { data = { raw: text }; }
-        if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "Save failed.");
-
-        statusEl.style.color = "lightgreen";
-        statusEl.textContent = `✅ ${data.message}`;
-
-      } catch (e) {
-        statusEl.style.color = "crimson";
-        statusEl.textContent = `❌ ${e.message || e}`;
-      } finally {
-        spinner.style.display = "none";
-        btn.disabled = false;
-      }
-    }
-
-
     // ---------------------------
-    // ✅ Option 2: ALWAYS refresh IP from backend (/my_vm)
+    // ✅ ALWAYS refresh VM from backend (/my_vm)
     // ---------------------------
     async function fetchMyVmWithRetries(maxTries = 30, delayMs = 5000) {
       const headers = await window.getAuthHeaders();
+      const base = await apiBase();
 
       for (let i = 1; i <= maxTries; i++) {
         const resp = await fetch(`${base}/my_vm`, { headers });
@@ -194,7 +279,7 @@
         return info;
       }
 
-      throw new Error("Timed out waiting for VM IP after resume. Try again in a minute.");
+      throw new Error("Timed out waiting for VM IP. Try again in a minute.");
     }
 
     async function initDashboard() {
@@ -232,7 +317,16 @@
 
         // Then load RAM + tasks
         await fetchRamUsage();
-        fetchLocalTasks();
+
+        // Agent-dependent task discovery
+        const agentOk = await ensureAgentOrShowHelp();
+        if (agentOk) {
+          // Recommended: tasks from local agent (not from Render backend)
+          fetchLocalTasksViaAgent();
+        } else {
+          // If you still want fallback server tasks, you can call it here (optional)
+          // fetchServerSideTasksFallback();
+        }
 
       } catch (e) {
         console.error("initDashboard failed:", e);
@@ -243,7 +337,8 @@
     async function fetchRamUsage() {
       const headers = await window.getAuthHeaders();
 
-      const response = await fetch(`${await apiBase()}/ram_usage?vm_ip=${encodeURIComponent(vmIp)}`, { headers });
+      const base = await apiBase();
+      const response = await fetch(`${base}/ram_usage?vm_ip=${encodeURIComponent(vmIp)}`, { headers });
       if (!response.ok) {
         const txt = await response.text().catch(() => "");
         throw new Error(`RAM usage failed (${response.status}): ${txt || response.statusText}`);
@@ -302,51 +397,49 @@
     }
 
     // ---------------------------
-    // ✅ Tasks list (local)
+    // ✅ Tasks list (preferred: local agent)
     // ---------------------------
-    function fetchLocalTasks() {
+    async function fetchLocalTasksViaAgent() {
       const taskList = document.getElementById("tasks");
       const loadingText = document.getElementById("task-loading");
 
       loadingText.style.display = "block";
       loadingText.style.color = "white";
-      loadingText.innerText = "Fetching tasks...";
+      loadingText.innerText = "Fetching local tasks via Agent...";
       taskList.innerHTML = "";
       taskArray = [];
 
-      fetch("${await apiBase()}/running_tasks/")
-        .then(r => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.json();
-        })
-        .then(data => {
-          loadingText.style.display = "none";
+      try {
+        const data = await fetchJson(`${AGENT_BASE}/running_tasks`);
 
-          if (!data.tasks || data.tasks.length === 0) {
-            taskList.innerHTML = "<option>No running tasks found</option>";
-            return;
+        loadingText.style.display = "none";
+
+        if (!data.tasks || data.tasks.length === 0) {
+          taskList.innerHTML = "<option>No running tasks found</option>";
+          return;
+        }
+
+        data.tasks.forEach(task => {
+          if (['notepad++.exe', 'chrome.exe', 'Code.exe'].includes(task.name)) {
+            taskArray.push({ pid: task.pid, name: task.name });
           }
-
-          data.tasks.forEach(task => {
-            if (['notepad++.exe', 'chrome.exe', 'Code.exe'].includes(task.name)) {
-              taskArray.push({ pid: task.pid, name: task.name });
-            }
-          });
-
-          const hasVSCode = (data.tasks || []).some(t => (t.name || "").toLowerCase() === "code.exe");
-          document.getElementById("migrate-vscode-btn").style.display = hasVSCode ? "inline-block" : "none";
-
-
-          populateDropdown();
-          loadingText.style.display = "block";
-          loadingText.innerText = `${taskArray.length} tasks fetched.`;
-        })
-        .catch(err => {
-          console.error("❌ Error fetching local tasks:", err);
-          loadingText.style.display = "block";
-          loadingText.style.color = "crimson";
-          loadingText.innerText = `❌ Failed to fetch tasks: ${err.message || err}`;
         });
+
+        const hasVSCode = (data.tasks || []).some(t => (t.name || "").toLowerCase() === "code.exe");
+        document.getElementById("migrate-vscode-btn").style.display = hasVSCode ? "inline-block" : "none";
+
+        populateDropdown();
+        loadingText.style.display = "block";
+        loadingText.innerText = `${taskArray.length} tasks fetched.`;
+
+      } catch (err) {
+        console.error("❌ Agent task fetch failed:", err);
+        loadingText.style.display = "block";
+        loadingText.style.color = "crimson";
+        loadingText.innerText = `❌ Failed to fetch tasks from Agent: ${err.message || err}`;
+        // Show panel again if agent is down
+        showAgentPanel(true, "❌ Agent is not responding. Start it and click Retry.", false);
+      }
     }
 
     function populateDropdown() {
@@ -369,6 +462,60 @@
     }
 
     // ---------------------------
+    // ✅ Save Project to Local (agent recommended)
+    // ---------------------------
+    async function saveProjectToLocal() {
+      const btn = document.getElementById("save-local-btn");
+      const spinner = document.getElementById("save-local-spinner");
+      const statusEl = document.getElementById("save-local-status");
+
+      try {
+        spinner.style.display = "inline-block";
+        btn.disabled = true;
+        statusEl.style.color = "white";
+        statusEl.textContent = "";
+
+        const agentOk = await ensureAgentOrShowHelp();
+        if (!agentOk) throw new Error("Local Agent not running.");
+
+        const project_name = prompt("Enter project folder name to save (example: CloudRAMSaaS):");
+        if (!project_name) return;
+
+        const info = await fetchMyVmWithRetries(6, 3000);
+        if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
+        vmIp = info.ip;
+
+        // Preferred: call backend to prepare zip/artifact + agent downloads it
+        // Option A: call your backend endpoint (protected) and let it stream to agent
+        // Option B: call agent directly and pass it a signed URL from backend
+
+        // Here is a simple pattern: ask backend for a signed download url, then tell agent to download.
+        const headers = await window.getAuthHeaders();
+        const base = await apiBase();
+
+        const prep = await fetchJson(`${base}/save_project_to_local`, {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ vm_ip: vmIp, project_name })
+        });
+
+        // If your backend already performs the full save, keep it.
+        // If instead it returns a URL, call agent to download:
+        // await fetchJson(`${AGENT_BASE}/download`, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ url: prep.url }) });
+
+        statusEl.style.color = "lightgreen";
+        statusEl.textContent = `✅ ${prep.message || "Saved successfully."}`;
+
+      } catch (e) {
+        statusEl.style.color = "crimson";
+        statusEl.textContent = `❌ ${e.message || e}`;
+      } finally {
+        spinner.style.display = "none";
+        btn.disabled = false;
+      }
+    }
+
+    // ---------------------------
     // ✅ Migrate (protected) - uses refreshed vmIp
     // ---------------------------
     async function migrateSelectedTasks() {
@@ -383,13 +530,11 @@
         statusEl.style.color = "white";
         statusEl.textContent = "";
 
-        // Always use latest IP (Option 2)
         const info = await fetchMyVmWithRetries(6, 3000);
         if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
         vmIp = info.ip;
         localStorage.setItem("vm_ip", vmIp);
 
-        // Selected tasks
         const selectedOptions = Array.from(taskSelect.selectedOptions);
         if (selectedOptions.length === 0) {
           statusEl.textContent = "⚠️ Select at least one task.";
@@ -399,20 +544,19 @@
         const task_names = selectedOptions.map(opt => opt.text.split(" (PID:")[0].trim());
 
         const headers = await window.getAuthHeaders();
-
         const base = await apiBase();
-        const resp = await fetch(`${base}/migrate_tasks/`, {
 
+        const resp = await fetch(`${base}/migrate_tasks/`, {
           method: "POST",
           headers: { ...headers, "Content-Type": "application/json" },
           body: JSON.stringify({ task_names, vm_ip: vmIp })
         });
 
-        const text = await response.text();
+        const text = await resp.text();
         let result;
         try { result = JSON.parse(text); } catch { result = { raw: text }; }
 
-        if (!response.ok) {
+        if (!resp.ok) {
           throw new Error(result.detail || result.error || result.raw || "Migration failed.");
         }
 
@@ -433,51 +577,50 @@
     }
 
     async function migrateVSCodeProject() {
-    const btn = document.getElementById("migrate-vscode-btn");
-    const spinner = document.getElementById("vscode-spinner");
-    const statusEl = document.getElementById("vscode-status");
+      const btn = document.getElementById("migrate-vscode-btn");
+      const spinner = document.getElementById("vscode-spinner");
+      const statusEl = document.getElementById("vscode-status");
 
-    try {
-    spinner.style.display = "inline-block";
-    btn.disabled = true;
-    statusEl.style.color = "white";
-    statusEl.textContent = "";
+      try {
+        spinner.style.display = "inline-block";
+        btn.disabled = true;
+        statusEl.style.color = "white";
+        statusEl.textContent = "";
 
-    // Always use latest VM IP
-    const info = await fetchMyVmWithRetries(10, 3000);
-    if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
-    vmIp = info.ip;
-    localStorage.setItem("vm_ip", vmIp);
+        const info = await fetchMyVmWithRetries(10, 3000);
+        if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
+        vmIp = info.ip;
+        localStorage.setItem("vm_ip", vmIp);
 
-    const headers = await window.getAuthHeaders();
+        const headers = await window.getAuthHeaders();
+        const base = await apiBase();
 
-    const base = await apiBase();
-    const resp = await fetch(`${base}/migrate_vscode/`, {
-    method: "POST",
-    headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({ vm_ip: vmIp })
-    });
+        const resp = await fetch(`${base}/migrate_vscode/`, {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ vm_ip: vmIp })
+        });
 
-    const text = await resp.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
-    if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "VSCode migration failed.");
+        if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "VSCode migration failed.");
 
-    statusEl.style.color = "lightgreen";
-    statusEl.textContent = `✅ VSCode migrated. Opened on VM: ${data.opened_path || "unknown"}`;
+        statusEl.style.color = "lightgreen";
+        statusEl.textContent = `✅ VSCode migrated. Opened on VM: ${data.opened_path || "unknown"}`;
 
-    } catch (e) {
-    statusEl.style.color = "crimson";
-    statusEl.textContent = `❌ ${e.message || e}`;
-    } finally {
-    spinner.style.display = "none";
-    btn.disabled = false;
-    }
+      } catch (e) {
+        statusEl.style.color = "crimson";
+        statusEl.textContent = `❌ ${e.message || e}`;
+      } finally {
+        spinner.style.display = "none";
+        btn.disabled = false;
+      }
     }
 
     // ---------------------------
-    // ✅ VNC iframe uses refreshed vmIp
+    // ✅ VNC iframe uses vmIp
     // ---------------------------
     function loadVncGui() {
       if (!vmIp) {

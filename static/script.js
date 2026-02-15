@@ -1,13 +1,49 @@
+// script.js (FULL FILE — updated to support Render Backend + Local Agent separation)
 console.log("✅ script.js loaded");
 
+// ==================================================
+// ✅ BASE URLS
+// ==================================================
 async function apiBase() {
   const cfg = await window.loadAppConfig();
+  // Render backend (FastAPI) base
   return (cfg.API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 }
 
-// =========================
+// Local Agent base (runs on user's machine)
+function agentBase() {
+  return "http://127.0.0.1:7071";
+}
+
+// Small helper: fetch JSON + good errors
+async function fetchJson(url, opts = {}) {
+  const r = await fetch(url, opts);
+  const text = await r.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
+  if (!r.ok) {
+    throw new Error(data.detail || data.error || data.raw || `HTTP ${r.status}`);
+  }
+  return data;
+}
+
+// Check if Local Agent is running
+async function isAgentOnline() {
+  try {
+    await fetchJson(`${agentBase()}/health`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ==================================================
 // ✅ NAVIGATION (DEFINE FIRST + GLOBAL)
-// =========================
+// ==================================================
 function navigate(page, pushState = true) {
   const pages = ["login-page", "register-page", "home-page", "allocate-page"];
 
@@ -47,11 +83,9 @@ function routeByPath() {
 
 window.navigate = navigate;
 
-// =========================
+// ==================================================
 // ✅ SUPABASE CONFIG
-// =========================
-
-
+// ==================================================
 async function getSb() {
   if (window._sbClient) return window._sbClient;
 
@@ -66,9 +100,9 @@ async function getSb() {
   return window._sbClient;
 }
 
-// =========================
+// ==================================================
 // ✅ AUTH UI REFRESH
-// =========================
+// ==================================================
 async function refreshUIForSession() {
   const sb = await getSb();
   if (!sb) return;
@@ -88,9 +122,9 @@ async function refreshUIForSession() {
   if (userEmailEl) userEmailEl.textContent = `Logged in as: ${session.user.email}`;
 }
 
-// =========================
+// ==================================================
 // ✅ AUTH FUNCTIONS (GLOBAL)
-// =========================
+// ==================================================
 async function registerUser() {
   const sb = await getSb();
   const errorEl = document.getElementById("register-error");
@@ -191,9 +225,9 @@ window.login = login;
 window.loginWithGoogle = loginWithGoogle;
 window.logout = logout;
 
-// =========================
+// ==================================================
 // ✅ Allocate page: Resume/New UI
-// =========================
+// ==================================================
 function setAllocateUIBusy(isBusy, msg = "") {
   const allocateBtn = document.getElementById("allocate-btn");
   const loadingText = document.getElementById("loading-text");
@@ -245,8 +279,9 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
     resumeBtn.addEventListener("click", async () => {
       try {
         setAllocateUIBusy(true, "Resuming VM... Please wait.");
-            const base = await apiBase();
-            const resp = await fetch(`${base}/start_vm`, {
+
+        const base = await apiBase();
+        const data = await fetchJson(`${base}/start_vm`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -254,12 +289,6 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
           },
           body: JSON.stringify({ vm_id: vmInfo.vm_id }),
         });
-
-        const text = await resp.text();
-        let data;
-        try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
-        if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "Failed to start VM.");
 
         localStorage.setItem("vm_id", data.vm_id);
         localStorage.setItem("vm_ip", data.ip);
@@ -282,9 +311,9 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
 
       try {
         setAllocateUIBusy(true, "Terminating old VM...");
-          const base = await apiBase();
-          const termResp = await fetch(`${base}/terminate_vm`, {
 
+        const base = await apiBase();
+        await fetchJson(`${base}/terminate_vm`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -292,11 +321,6 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
           },
           body: JSON.stringify({ vm_id: vmInfo.vm_id }),
         });
-
-        if (!termResp.ok) {
-          const t = await termResp.text();
-          throw new Error(t);
-        }
 
         if (allocateBtn) {
           allocateBtn.style.display = "inline-block";
@@ -330,16 +354,9 @@ async function checkExistingVmAndRenderChoices() {
     localStorage.setItem("sb_access_token", accessToken);
 
     const base = await apiBase();
-    const resp = await fetch(`${base}/my_vm`, {
-
+    const info = await fetchJson(`${base}/my_vm`, {
       headers: { "Authorization": `Bearer ${accessToken}` }
     });
-
-    const text = await resp.text();
-    let info;
-    try { info = JSON.parse(text); } catch { info = { raw: text }; }
-
-    if (!resp.ok) return;
 
     if (!info.exists) {
       allocateBtn.style.display = "inline-block";
@@ -369,9 +386,10 @@ async function checkExistingVmAndRenderChoices() {
   }
 }
 
-// =========================
+// ==================================================
 // ✅ ALLOCATE RAM (Protected)
-// =========================
+//   - Requires Local Agent to be running (public-safe separation)
+// ==================================================
 async function allocateRAM() {
   const sb = await getSb();
   const allocateBtn = document.getElementById("allocate-btn");
@@ -392,8 +410,14 @@ async function allocateRAM() {
     const accessToken = session.access_token;
     localStorage.setItem("sb_access_token", accessToken);
 
+    // ✅ Enforce Local Agent for public-safe architecture
+    const agentOk = await isAgentOnline();
+    if (!agentOk) {
+      throw new Error("Local Agent is not running. Start the agent (http://127.0.0.1:7071) and try again.");
+    }
+
     const base = await apiBase();
-    const response = await fetch(`${base}/allocate`, {
+    const data = await fetchJson(`${base}/allocate`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -401,14 +425,6 @@ async function allocateRAM() {
       },
       body: JSON.stringify({ ram_size: ramSize }),
     });
-
-    const text = await response.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
-    if (!response.ok) {
-      throw new Error(`Allocate failed: ${response.status} ${data.detail || data.raw || ""}`);
-    }
 
     if (data.action_required) {
       renderStoppedVmChoices({ vm_id: data.vm_id, state: data.state, ip: data.ip }, accessToken);
@@ -432,9 +448,9 @@ async function allocateRAM() {
   }
 }
 
-// =========================
+// ==================================================
 // ✅ INIT
-// =========================
+// ==================================================
 document.addEventListener("DOMContentLoaded", async () => {
   navigate("login", false);
 
