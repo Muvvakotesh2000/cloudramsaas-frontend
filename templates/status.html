@@ -1,3 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Cloud RAM Dashboard</title>
+
+  <!-- Supabase + auth helper -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/static/config.js" defer></script>
+  <script src="/static/status_auth.js?v=6" defer></script>
+
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #1e3c72, #2a5298);
+      color: #fff;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    .spinner {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 3px solid #fff;
+      border-radius: 50%;
+      border-top: 3px solid #00c4cc;
+      animation: spin 1s linear infinite;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .button {
+      background-color: #00c4cc;
+      border: none;
+      color: white;
+      padding: 10px 18px;
+      margin: 8px 4px;
+      font-size: 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.3s ease;
+    }
+    .button:hover { background-color: #009fa3; }
+    .button:disabled { background-color: #999; cursor: not-allowed; opacity: 0.6; }
+    .danger { background-color: #ff5b5b; }
+    .danger:hover { background-color: #e04747; }
+
+    iframe { width: 100%; height: 500px; border: none; }
+    #tasks { min-width: 320px; min-height: 140px; }
+
+    .panel {
+      width: min(920px, 95vw);
+      background: rgba(255,255,255,0.10);
+      border: 1px solid rgba(255,255,255,0.20);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-top: 12px;
+    }
+    .muted { opacity: 0.9; font-size: 13px; }
+    .ok { color: lightgreen; }
+    .bad { color: #ffb3b3; }
+    code {
+      background: rgba(0,0,0,0.25);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Cloud RAM Dashboard</h1>
+  <div id="status-text">Loading...</div>
+
+  <div style="margin-top:12px;">
+    <button class="button danger" id="stop-vm-btn">Stop VM</button>
+    <span id="stop-spinner" style="display:none;" class="spinner"></span>
+    <p id="stop-status" style="margin-top: 10px; font-weight: bold;"></p>
+  </div>
+
+  <h2>Running Tasks</h2>
+  <div id="tasks-container">
+    <p id="task-loading">Fetching tasks...</p>
+    <select id="tasks" multiple></select>
+    <div>
+      <button class="button" id="migrate-btn">Migrate Selected Tasks</button>
+      <span id="migration-spinner" style="display:none;" class="spinner"></span>
+      <p id="migration-status" style="margin-top: 10px; font-weight: bold;"></p>
+
+      <button class="button" id="migrate-vscode-btn" style="display:none;">Migrate VSCode Project</button>
+      <span id="vscode-spinner" style="display:none;" class="spinner"></span>
+      <p id="vscode-status" style="margin-top: 10px; font-weight: bold;"></p>
+
+      <button class="button" id="save-local-btn">Save Project to Local</button>
+      <span id="save-local-spinner" style="display:none;" class="spinner"></span>
+      <p id="save-local-status" style="margin-top: 10px; font-weight: bold;"></p>
+    </div>
+  </div>
+
+  <h2>VM GUI (VNC)</h2>
+  <div id="vnc-container">
+    <p id="vnc-loading">VNC ready.</p>
+    <a id="vnc-link" class="button" target="_blank" rel="noopener" style="display:none;">Open VM GUI (VNC)</a>
+  </div>
+  
 <script>
   let taskArray = [];
   let vmIp = null;
