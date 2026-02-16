@@ -1,8 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Cloud RAM Dashboard</title>
 
   <!-- Supabase + auth helper -->
@@ -10,381 +8,102 @@
   <script src="/static/config.js" defer></script>
   <script src="/static/status_auth.js?v=6" defer></script>
 
-  <!-- ✅ UI Enhancements only (IDs + JS unchanged) -->
   <style>
-    :root{
-      --bg0:#070A12;
-      --bg1:#0A1022;
-      --card:rgba(255,255,255,.07);
-      --card2:rgba(255,255,255,.10);
-      --border:rgba(255,255,255,.14);
-      --muted:rgba(255,255,255,.74);
-      --text:#F5F7FF;
-      --accent:#36C2FF;
-      --accent2:#7C5CFF;
-      --danger:#FF5B5B;
-      --danger2:#FF8A8A;
-      --ok:#30D989;
-      --warn:#FFD166;
-      --shadow: 0 18px 60px rgba(0,0,0,.55);
-      --shadow2: 0 10px 30px rgba(0,0,0,.35);
-      --radius: 18px;
-      --radius2: 14px;
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #1e3c72, #2a5298);
+      color: #fff;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
     }
-
-    *{ box-sizing:border-box; }
-    html,body{ height:100%; }
-    body{
-      margin:0;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
-      color:var(--text);
-      background:
-        radial-gradient(1100px 700px at 15% 20%, rgba(124,92,255,.25), transparent 55%),
-        radial-gradient(900px 600px at 85% 15%, rgba(54,194,255,.22), transparent 55%),
-        radial-gradient(700px 500px at 50% 85%, rgba(48,217,137,.12), transparent 55%),
-        linear-gradient(180deg, var(--bg0), var(--bg1));
-      overflow-x:hidden;
-    }
-
-    /* Subtle grid */
-    body::before{
-      content:"";
-      position:fixed; inset:0;
-      background-image:
-        linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
-      background-size: 48px 48px;
-      opacity:.35;
-      pointer-events:none;
-      mask-image: radial-gradient(circle at 50% 35%, rgba(0,0,0,1), rgba(0,0,0,.2) 70%, rgba(0,0,0,0) 100%);
-    }
-
-    /* Layout wrapper */
-    .wrap{
-      width:min(1100px, 94vw);
-      margin: 24px auto 44px;
-      display:flex;
-      flex-direction:column;
-      gap: 14px;
-    }
-
-    /* Header */
-    .topbar{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:12px;
-      padding: 14px 16px;
-      border-radius: 999px;
-      background: rgba(255,255,255,.06);
-      border: 1px solid rgba(255,255,255,.14);
-      box-shadow: var(--shadow2);
-      backdrop-filter: blur(14px);
-      -webkit-backdrop-filter: blur(14px);
-    }
-    .brand{
-      display:flex;
-      flex-direction:column;
-      gap:2px;
-      padding-left:6px;
-    }
-    .brand h1{
-      margin:0;
-      font-size: 16px;
-      letter-spacing:.2px;
-    }
-    .brand .sub{
-      font-size: 12px;
-      color: var(--muted);
-    }
-    .chip{
-      display:inline-flex;
-      align-items:center;
-      gap:8px;
-      padding: 9px 12px;
-      border-radius: 999px;
-      background: rgba(255,255,255,.08);
-      border: 1px solid rgba(255,255,255,.14);
-      color: rgba(255,255,255,.88);
-      font-weight: 600;
-      letter-spacing:.15px;
-      white-space:nowrap;
-    }
-    .dot{
-      width:9px; height:9px;
-      border-radius:50%;
-      background: var(--warn);
-      box-shadow: 0 0 0 4px rgba(255,209,102,.14);
-      flex:0 0 auto;
-    }
-
-    /* Panels */
-    .panel{
-      width:100%;
-      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.05));
-      border: 1px solid rgba(255,255,255,.14);
-      border-radius: var(--radius);
-      padding: 16px 16px;
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(14px);
-      -webkit-backdrop-filter: blur(14px);
-      position:relative;
-      overflow:hidden;
-    }
-    .panel::after{
-      content:"";
-      position:absolute; inset:-2px;
-      background: radial-gradient(700px 240px at 30% 0%, rgba(54,194,255,.18), transparent 60%),
-                  radial-gradient(700px 240px at 80% 0%, rgba(124,92,255,.16), transparent 60%);
-      pointer-events:none;
-      opacity:.85;
-    }
-    .panel > *{ position:relative; z-index:1; }
-
-    .panel-title{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:12px;
-      margin-bottom: 10px;
-    }
-    .panel-title h2{
-      margin:0;
-      font-size: 16px;
-      letter-spacing:.2px;
-    }
-    .muted{ color: var(--muted); font-size: 13px; }
-
-    /* Status card */
-    #status-text{
-      line-height: 1.45;
-      font-size: 14px;
-      color: rgba(255,255,255,.92);
-      padding: 12px 12px;
-      border-radius: var(--radius2);
-      background: rgba(0,0,0,.18);
-      border: 1px solid rgba(255,255,255,.10);
-    }
-
-    /* Buttons */
-    .btnrow{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-    }
-    .button{
-      appearance:none;
-      border:none;
-      border-radius: 12px;
-      padding: 12px 14px;
-      cursor:pointer;
-      font-weight: 800;
-      letter-spacing:.15px;
-      transition: transform .12s ease, filter .18s ease, background .18s ease, box-shadow .18s ease, opacity .18s ease;
-      background: linear-gradient(135deg, rgba(54,194,255,.95), rgba(124,92,255,.95));
-      color:#071118;
-      box-shadow: 0 14px 26px rgba(124,92,255,.14);
-    }
-    .button:hover{ filter: brightness(1.05); transform: translateY(-1px); }
-    .button:active{ transform: translateY(0); }
-    .button:disabled{
-      opacity:.45;
-      cursor:not-allowed;
-      transform:none !important;
-      filter:none !important;
-      box-shadow:none !important;
-      background: rgba(255,255,255,.10);
-      color: rgba(255,255,255,.70);
-      border: 1px solid rgba(255,255,255,.16);
-    }
-    .danger{
-      background: linear-gradient(135deg, rgba(255,91,91,.95), rgba(255,138,138,.85));
-      color:#1b0a0a;
-      box-shadow: 0 14px 26px rgba(255,91,91,.14);
-    }
-    .danger:hover{ filter: brightness(1.03); }
-
-    /* Select / tasks */
-    #tasks-container{
-      display:flex;
-      flex-direction:column;
-      gap: 10px;
-    }
-    #task-loading{
-      margin:0;
-      padding: 10px 12px;
-      border-radius: var(--radius2);
-      background: rgba(0,0,0,.18);
-      border: 1px solid rgba(255,255,255,.10);
-      color: rgba(255,255,255,.92);
-    }
-
-    #tasks{
-      width: 100%;
-      min-height: 160px;
-      padding: 10px;
-      border-radius: var(--radius2);
-      border: 1px solid rgba(255,255,255,.16);
-      background: rgba(7,10,18,.45);
-      color: var(--text);
-      outline:none;
-      box-shadow: inset 0 0 0 1px rgba(0,0,0,.15);
-    }
-    #tasks:focus{
-      border-color: rgba(54,194,255,.55);
-      box-shadow: 0 0 0 4px rgba(54,194,255,.18);
-    }
-    #tasks option{
-      padding: 8px;
-    }
-
-    /* Status lines */
-    #migration-status, #vscode-status, #save-local-status, #stop-status{
-      margin: 8px 0 0;
-      padding: 10px 12px;
-      border-radius: var(--radius2);
-      background: rgba(0,0,0,.18);
-      border: 1px solid rgba(255,255,255,.10);
-      font-weight: 700;
-    }
-    #migration-status:empty,
-    #vscode-status:empty,
-    #save-local-status:empty,
-    #stop-status:empty{
-      display:none;
-    }
-
-    /* Spinner */
-    .spinner{
-      display:inline-block;
-      width: 22px;
-      height: 22px;
-      border: 3px solid rgba(255,255,255,.65);
+    .spinner {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 3px solid #fff;
       border-radius: 50%;
-      border-top: 3px solid rgba(54,194,255,1);
+      border-top: 3px solid #00c4cc;
       animation: spin 1s linear infinite;
+      margin-left: 10px;
       vertical-align: middle;
     }
-    @keyframes spin{ to{ transform: rotate(360deg);} }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* VNC area */
-    #vnc-container{
-      display:flex;
-      flex-direction:column;
-      gap: 10px;
+    .button {
+      background-color: #00c4cc;
+      border: none;
+      color: white;
+      padding: 10px 18px;
+      margin: 8px 4px;
+      font-size: 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.3s ease;
     }
-    #vnc-loading{
-      margin:0;
-      padding: 10px 12px;
-      border-radius: var(--radius2);
-      background: rgba(0,0,0,.18);
-      border: 1px solid rgba(255,255,255,.10);
-      color: rgba(255,255,255,.92);
-    }
-    #vnc-link{
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      width: fit-content;
-      text-decoration:none;
-    }
+    .button:hover { background-color: #009fa3; }
+    .button:disabled { background-color: #999; cursor: not-allowed; opacity: 0.6; }
+    .danger { background-color: #ff5b5b; }
+    .danger:hover { background-color: #e04747; }
 
-    code{
-      background: rgba(0,0,0,.28);
-      padding: 3px 7px;
+    iframe { width: 100%; height: 500px; border: none; }
+    #tasks { min-width: 320px; min-height: 140px; }
+
+    .panel {
+      width: min(920px, 95vw);
+      background: rgba(255,255,255,0.10);
+      border: 1px solid rgba(255,255,255,0.20);
       border-radius: 10px;
-      border: 1px solid rgba(255,255,255,.12);
-      color: rgba(255,255,255,.90);
+      padding: 14px 16px;
+      margin-top: 12px;
     }
-
-    /* Responsive */
-    @media (max-width: 640px){
-      .topbar{
-        flex-wrap:wrap;
-        border-radius: 18px;
-      }
-      .chip{
-        width:100%;
-        justify-content:flex-start;
-      }
-      .panel{ padding: 14px 14px; }
+    .muted { opacity: 0.9; font-size: 13px; }
+    .ok { color: lightgreen; }
+    .bad { color: #ffb3b3; }
+    code {
+      background: rgba(0,0,0,0.25);
+      padding: 2px 6px;
+      border-radius: 6px;
     }
   </style>
 </head>
 
 <body>
-  <div class="wrap">
-    <!-- ✅ New header (doesn't affect JS) -->
-    <div class="topbar">
-      <div class="brand">
-        <h1>Cloud RAM Dashboard</h1>
-        <div class="sub">Monitor RAM, migrate tasks, and open VNC</div>
-      </div>
-      <div class="chip" title="Agent + VM status indicator (visual only)">
-        <span class="dot"></span>
-        <span>Dashboard Active</span>
-      </div>
+  <h1>Cloud RAM Dashboard</h1>
+  <div id="status-text">Loading...</div>
+
+  <div style="margin-top:12px;">
+    <button class="button danger" id="stop-vm-btn">Stop VM</button>
+    <span id="stop-spinner" style="display:none;" class="spinner"></span>
+    <p id="stop-status" style="margin-top: 10px; font-weight: bold;"></p>
+  </div>
+
+  <h2>Running Tasks</h2>
+  <div id="tasks-container">
+    <p id="task-loading">Fetching tasks...</p>
+    <select id="tasks" multiple></select>
+    <div>
+      <button class="button" id="migrate-btn">Migrate Selected Tasks</button>
+      <span id="migration-spinner" style="display:none;" class="spinner"></span>
+      <p id="migration-status" style="margin-top: 10px; font-weight: bold;"></p>
+
+      <button class="button" id="migrate-vscode-btn" style="display:none;">Migrate VSCode Project</button>
+      <span id="vscode-spinner" style="display:none;" class="spinner"></span>
+      <p id="vscode-status" style="margin-top: 10px; font-weight: bold;"></p>
+
+      <button class="button" id="save-local-btn">Save Project to Local</button>
+      <span id="save-local-spinner" style="display:none;" class="spinner"></span>
+      <p id="save-local-status" style="margin-top: 10px; font-weight: bold;"></p>
     </div>
+  </div>
 
-    <!-- Status -->
-    <div class="panel">
-      <div class="panel-title">
-        <h2>VM Status</h2>
-        <span class="muted">Live RAM + connectivity</span>
-      </div>
-      <div id="status-text">Loading...</div>
-
-      <div class="btnrow" style="margin-top:12px;">
-        <button class="button danger" id="stop-vm-btn">Stop VM</button>
-        <span id="stop-spinner" style="display:none;" class="spinner"></span>
-      </div>
-      <p id="stop-status" style="margin-top: 10px; font-weight: bold;"></p>
-    </div>
-
-    <!-- Tasks -->
-    <div class="panel">
-      <div class="panel-title">
-        <h2>Running Tasks</h2>
-        <span class="muted">Select one or more to migrate</span>
-      </div>
-
-      <div id="tasks-container">
-        <p id="task-loading">Fetching tasks...</p>
-        <select id="tasks" multiple></select>
-
-        <div class="btnrow">
-          <button class="button" id="migrate-btn">Migrate Selected Tasks</button>
-          <span id="migration-spinner" style="display:none;" class="spinner"></span>
-        </div>
-        <p id="migration-status" style="margin-top: 10px; font-weight: bold;"></p>
-
-        <div class="btnrow">
-          <button class="button" id="migrate-vscode-btn" style="display:none;">Migrate VSCode Project</button>
-          <span id="vscode-spinner" style="display:none;" class="spinner"></span>
-        </div>
-        <p id="vscode-status" style="margin-top: 10px; font-weight: bold;"></p>
-
-        <div class="btnrow">
-          <button class="button" id="save-local-btn">Save Project to Local</button>
-          <span id="save-local-spinner" style="display:none;" class="spinner"></span>
-        </div>
-        <p id="save-local-status" style="margin-top: 10px; font-weight: bold;"></p>
-      </div>
-    </div>
-
-    <!-- VNC -->
-    <div class="panel">
-      <div class="panel-title">
-        <h2>VM GUI (VNC)</h2>
-        <span class="muted">Opens in a new tab</span>
-      </div>
-
-      <div id="vnc-container">
-        <p id="vnc-loading">VNC ready.</p>
-        <a id="vnc-link" class="button" target="_blank" rel="noopener" style="display:none;">Open VM GUI (VNC)</a>
-      </div>
-    </div>
+  <h2>VM GUI (VNC)</h2>
+  <div id="vnc-container">
+    <p id="vnc-loading">VNC ready.</p>
+    <a id="vnc-link" class="button" target="_blank" rel="noopener" style="display:none;">Open VM GUI (VNC)</a>
   </div>
 
 <script>
@@ -425,6 +144,8 @@
   }
 
   async function getAccessToken() {
+    // status_auth.js should have already initialized supabase and headers,
+    // but simplest: use your existing helper if present
     if (window.getAuthHeaders) {
       const h = await window.getAuthHeaders();
       const auth = h.Authorization || h.authorization || "";
@@ -523,9 +244,13 @@
         return;
       }
 
+      // VNC link (new tab)
       loadVncGui();
+
+      // RAM usage from backend (which calls VM)
       await fetchRamUsage();
 
+      // Tasks via Local Agent
       const agentOk = await isAgentOnline();
       if (!agentOk) {
         const loadingText = document.getElementById("task-loading");
@@ -561,6 +286,9 @@
     `;
   }
 
+  // ---------------------------
+  // ✅ Stop VM via backend
+  // ---------------------------
   async function stopVmNow() {
     const stopBtn = document.getElementById("stop-vm-btn");
     const spinner = document.getElementById("stop-spinner");
@@ -600,6 +328,9 @@
     }
   }
 
+  // ---------------------------
+  // ✅ Tasks list via Local Agent
+  // ---------------------------
   async function fetchLocalTasksViaAgent() {
     const taskList = document.getElementById("tasks");
     const loadingText = document.getElementById("task-loading");
@@ -658,6 +389,9 @@
     });
   }
 
+  // ---------------------------
+  // ✅ Migrate Selected Tasks via Local Agent
+  // ---------------------------
   async function migrateSelectedTasks() {
     const migrateBtn = document.getElementById("migrate-btn");
     const spinner = document.getElementById("migration-spinner");
@@ -685,8 +419,11 @@
       }
 
       const task_names = selectedOptions.map(opt => opt.text.split(" (PID:")[0].trim());
+
       const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
+
+      // ✅ FIX: include user_id (FastAPI model requires it)
       const user_id = await getUserId();
 
       const result = await fetchJson(`${AGENT_BASE}/migrate_tasks`, {
@@ -731,6 +468,7 @@
 
       const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
+
       const user_id = await getUserId();
 
       const data = await fetchJson(`${AGENT_BASE}/migrate_vscode`, {
@@ -773,6 +511,8 @@
 
       const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
+
+      // ✅ FIX: include user_id (FastAPI model requires it)
       const user_id = await getUserId();
 
       const resp = await fetchJson(`${AGENT_BASE}/save_project_to_local`, {
@@ -792,6 +532,9 @@
     }
   }
 
+  // ---------------------------
+  // ✅ VNC link (HTTPS page cannot iframe HTTP)
+  // ---------------------------
   function loadVncGui() {
     const loading = document.getElementById("vnc-loading");
     const link = document.getElementById("vnc-link");
