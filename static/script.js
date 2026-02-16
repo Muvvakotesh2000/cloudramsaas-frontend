@@ -45,7 +45,9 @@ async function isAgentOnline() {
 }
 
 // ==================================================
-// ✅ ALLOCATE PAGE: Local Agent Gate + Copy Commands
+// ✅ ALLOCATE PAGE: Local Agent Gate + Install&Run (merged) + Retry
+//   - (Removed) Download ZIP button (HTML removed)
+//   - (Removed) Autostart button + command (HTML removed)
 // ==================================================
 function buildInstallCommand() {
   return [
@@ -79,17 +81,10 @@ function buildRunCommand() {
   ].join(" ; ");
 }
 
-function buildAutoStartCommand() {
-  return [
-    '$ErrorActionPreference="Stop"',
-    '$dest="C:\\CloudRAMS\\LocalAgent"',
-    '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
-    'if (-not $root) { throw "Agent folder not found. Run install first." }',
-    '$py="$($root.FullName)\\.venv\\Scripts\\python.exe"',
-    '$script="$($root.FullName)\\agent_main.py"',
-    'schtasks /Create /TN "CloudRAMS-LocalAgent" /TR "`"$py`" `"$script`"" /SC ONLOGON /RL HIGHEST /F',
-    'Write-Host "✅ Auto-start scheduled task created: CloudRAMS-LocalAgent"'
-  ].join(" ; ");
+// ✅ New: merged "Install & Run Agent" command
+function buildInstallAndRunCommand() {
+  // Install then immediately run
+  return `${buildInstallCommand()} ; ${buildRunCommand()}`;
 }
 
 function setAllocateGateUI({ ok, msg }) {
@@ -110,11 +105,19 @@ async function enforceAgentGateOnAllocate() {
 
   const ok = await isAgentOnline();
   if (ok) {
-    setAllocateGateUI({ ok: true, msg: "✅ Local Agent is running. You can allocate RAM." });
+    setAllocateGateUI({
+      ok: true,
+      msg: "✅ Local Agent is running. Redirecting to status..."
+    });
+
+    // ✅ Requirement: only after agent is successfully running, redirect to status
+    setTimeout(() => {
+      window.location.href = "/status";
+    }, 400);
   } else {
     setAllocateGateUI({
       ok: false,
-      msg: "❌ Local Agent is NOT running. Install + run it, then click Retry."
+      msg: "❌ Local Agent is NOT running. Click 'Install & Run Agent', run it in PowerShell, then click Retry."
     });
   }
 }
@@ -148,7 +151,15 @@ function navigate(page, pushState = true) {
 
   if (page === "allocate") {
     setTimeout(async () => {
-      await enforceAgentGateOnAllocate();      // ✅ gate allocate
+      // Show agent status, but DO NOT redirect automatically here
+      // Redirect should happen only after user clicks Retry (or if they land on /allocate directly below).
+      const ok = await isAgentOnline();
+      if (ok) {
+        setAllocateGateUI({ ok: true, msg: "✅ Local Agent is running. Click Allocate to continue (or Retry to go to status)." });
+      } else {
+        setAllocateGateUI({ ok: false, msg: "❌ Local Agent is NOT running. Install & run it, then click Retry." });
+      }
+
       await checkExistingVmAndRenderChoices(); // existing VM logic
     }, 0);
   }
@@ -555,42 +566,30 @@ document.addEventListener("DOMContentLoaded", async () => {
   const retry = document.getElementById("allocate-agent-retry");
   if (retry) retry.addEventListener("click", enforceAgentGateOnAllocate);
 
-  const ci = document.getElementById("allocate-copy-install");
-  if (ci) ci.addEventListener("click", async () => {
+  // ✅ NEW: Install & Run merged button
+  const installRun = document.getElementById("allocate-install-run");
+  if (installRun) installRun.addEventListener("click", async () => {
     try {
-      await navigator.clipboard.writeText(buildInstallCommand());
-      setAllocateGateUI({ ok: false, msg: "📋 Install command copied. Paste into PowerShell and run once." });
+      await navigator.clipboard.writeText(buildInstallAndRunCommand());
+      setAllocateGateUI({
+        ok: false,
+        msg: "📋 Install & Run command copied. Paste into PowerShell to install + start the agent, then click Retry."
+      });
     } catch {
       setAllocateGateUI({ ok: false, msg: "❌ Could not copy. Open console for command." });
-      console.log("INSTALL CMD:\n", buildInstallCommand());
-    }
-  });
-
-  const cr = document.getElementById("allocate-copy-run");
-  if (cr) cr.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(buildRunCommand());
-      setAllocateGateUI({ ok: false, msg: "📋 Run command copied. Paste into PowerShell to start the agent." });
-    } catch {
-      setAllocateGateUI({ ok: false, msg: "❌ Could not copy. Open console for command." });
-      console.log("RUN CMD:\n", buildRunCommand());
-    }
-  });
-
-  const ca = document.getElementById("allocate-copy-autostart");
-  if (ca) ca.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(buildAutoStartCommand());
-      setAllocateGateUI({ ok: false, msg: "📋 Auto-start command copied. Paste into PowerShell to run agent on login." });
-    } catch {
-      setAllocateGateUI({ ok: false, msg: "❌ Could not copy. Open console for command." });
-      console.log("AUTOSTART CMD:\n", buildAutoStartCommand());
+      console.log("INSTALL+RUN CMD:\n", buildInstallAndRunCommand());
     }
   });
 
   // If user lands directly on /allocate
   if (window.location.pathname.toLowerCase() === "/allocate") {
-    await enforceAgentGateOnAllocate();
+    // Only redirect after explicit Retry click (enforceAgentGateOnAllocate handles redirect when ok)
+    const ok = await isAgentOnline();
+    if (ok) {
+      setAllocateGateUI({ ok: true, msg: "✅ Local Agent is running. Click Retry to go to status, or Allocate to continue." });
+    } else {
+      setAllocateGateUI({ ok: false, msg: "❌ Local Agent is NOT running. Install & run it, then click Retry." });
+    }
     await checkExistingVmAndRenderChoices();
   }
 });
