@@ -105,7 +105,7 @@
     <p id="vnc-loading">VNC ready.</p>
     <a id="vnc-link" class="button" target="_blank" rel="noopener" style="display:none;">Open VM GUI (VNC)</a>
   </div>
-  
+
 <script>
   let taskArray = [];
   let vmIp = null;
@@ -119,12 +119,18 @@
     return (cfg.API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
   }
 
+  // ✅ Better error surfacing (no "[object Object]")
   async function fetchJson(url, opts = {}) {
     const r = await fetch(url, opts);
     const text = await r.text();
+
     let data;
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
-    if (!r.ok) throw new Error(data.detail || data.error || data.raw || `HTTP ${r.status}`);
+
+    if (!r.ok) {
+      const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
     return data;
   }
 
@@ -142,13 +148,20 @@
     // but simplest: use your existing helper if present
     if (window.getAuthHeaders) {
       const h = await window.getAuthHeaders();
-      // h.Authorization is "Bearer <token>"
       const auth = h.Authorization || h.authorization || "";
       return auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
     }
-
-    // fallback: read from localStorage if you stored it
     return localStorage.getItem("sb_access_token") || "";
+  }
+
+  // ✅ Centralized user_id fetch
+  async function getUserId() {
+    const sb = window._sbClient;
+    if (!sb) throw new Error("Supabase client not initialized.");
+    const { data: { user } } = await sb.auth.getUser();
+    const user_id = user?.id;
+    if (!user_id) throw new Error("Could not determine user_id.");
+    return user_id;
   }
 
   // ========= Dashboard init =========
@@ -329,9 +342,7 @@
     taskArray = [];
 
     try {
-      // IMPORTANT: no trailing slash
       const data = await fetchJson(`${AGENT_BASE}/running_tasks`);
-
       loadingText.style.display = "none";
 
       if (!data.tasks || data.tasks.length === 0) {
@@ -379,7 +390,7 @@
   }
 
   // ---------------------------
-  // ✅ Migrate via Local Agent (Agent proxies to backend)
+  // ✅ Migrate Selected Tasks via Local Agent
   // ---------------------------
   async function migrateSelectedTasks() {
     const migrateBtn = document.getElementById("migrate-btn");
@@ -408,13 +419,17 @@
       }
 
       const task_names = selectedOptions.map(opt => opt.text.split(" (PID:")[0].trim());
+
       const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
+
+      // ✅ FIX: include user_id (FastAPI model requires it)
+      const user_id = await getUserId();
 
       const result = await fetchJson(`${AGENT_BASE}/migrate_tasks`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ access_token, vm_ip: vmIp, task_names })
+        body: JSON.stringify({ access_token, user_id, vm_ip: vmIp, task_names })
       });
 
       const okCount = (result.results || []).filter(r => r.success).length;
@@ -454,21 +469,12 @@
       const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
 
-      // Get user_id from Supabase session
-      const sb = window._sbClient;
-      const { data: { user } } = await sb.auth.getUser();
-      const user_id = user?.id;
-
-      if (!user_id) throw new Error("Could not determine user_id.");
+      const user_id = await getUserId();
 
       const data = await fetchJson(`${AGENT_BASE}/migrate_vscode`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          access_token,
-          vm_ip: vmIp,
-          user_id
-        })
+        body: JSON.stringify({ access_token, vm_ip: vmIp, user_id })
       });
 
       statusEl.style.color = "lightgreen";
@@ -506,10 +512,13 @@
       const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
 
+      // ✅ FIX: include user_id (FastAPI model requires it)
+      const user_id = await getUserId();
+
       const resp = await fetchJson(`${AGENT_BASE}/save_project_to_local`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ access_token, vm_ip: vmIp, project_name })
+        body: JSON.stringify({ access_token, user_id, vm_ip: vmIp, project_name })
       });
 
       statusEl.style.color = "lightgreen";
@@ -545,3 +554,6 @@
     link.style.display = "inline-block";
   }
 </script>
+
+</body>
+</html>

@@ -22,14 +22,13 @@ const AGENT_ZIP_URL =
 async function fetchJson(url, opts = {}) {
   const r = await fetch(url, opts);
   const text = await r.text();
+
   let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    data = { raw: text };
-  }
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
   if (!r.ok) {
-    throw new Error(data.detail || data.error || data.raw || `HTTP ${r.status}`);
+    const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return data;
 }
@@ -170,6 +169,7 @@ function routeByPath() {
   if (path === "/register") return navigate("register", false);
   if (path === "/login") return navigate("login", false);
   if (path === "/allocate") return navigate("allocate", false);
+  if (path === "/") return navigate("home", false);
   return navigate("login", false);
 }
 
