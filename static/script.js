@@ -1,13 +1,12 @@
-// frontend/static/script.js (FULL FILE)
-// ✅ Rules implemented:
-// 1) NEVER auto-redirect to /status just because agent is running.
-// 2) User MUST click Allocate.
-// 3) On Allocate click: check /my_vm:
-//    - if running + ip -> go /status
-//    - if stopped/stopping -> show Resume + Create New buttons
-//    - if no VM -> call /allocate to create new VM, then go /status
-// 4) Allocate button enabled ONLY when agent is online.
-// 5) Install & Run always copies (clipboard -> textarea -> prompt fallback)
+// frontend/static/script.js (FULL FILE — corrected)
+// ✅ No auto-redirect to dashboard just because Agent is running
+// ✅ Allocate button enables reliably when Agent is running
+// ✅ Allocate click flow:
+//    - checks existing VM (timeout + retry)
+//    - if RUNNING -> go dashboard
+//    - if STOPPED -> show Resume / Create New buttons
+//    - if no VM -> allocate new VM
+// ✅ Install & Run button copy works reliably (clipboard + fallback)
 
 console.log("✅ script.js loaded");
 
@@ -27,8 +26,22 @@ const AGENT_ZIP_URL =
   "https://github.com/Muvvakotesh2000/cloudramsaas-LocalAgent/archive/refs/heads/main.zip";
 
 // ==================================================
-// ✅ HELPERS
+// ✅ Helpers
 // ==================================================
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function fetchJson(url, opts = {}) {
   const r = await fetch(url, opts);
   const text = await r.text();
@@ -42,15 +55,29 @@ async function fetchJson(url, opts = {}) {
   return data;
 }
 
+async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 12000) {
+  const r = await fetchWithTimeout(url, opts, timeoutMs);
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+  if (!r.ok) {
+    const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return data;
+}
+
 async function isAgentOnline() {
   try {
-    const r = await fetch(`${agentBase()}/health`, { cache: "no-store" });
+    const r = await fetchWithTimeout(`${agentBase()}/health`, { cache: "no-store" }, 2500);
     return r.ok;
   } catch {
     return false;
   }
 }
 
+// Clipboard copy that always gives user a way to copy
 async function copyTextReliable(text) {
   // 1) modern clipboard
   try {
@@ -60,7 +87,7 @@ async function copyTextReliable(text) {
     }
   } catch {}
 
-  // 2) textarea fallback
+  // 2) fallback textarea copy
   try {
     const ta = document.createElement("textarea");
     ta.value = text;
@@ -69,6 +96,7 @@ async function copyTextReliable(text) {
     ta.style.left = "-9999px";
     ta.style.top = "-9999px";
     document.body.appendChild(ta);
+    ta.focus();
     ta.select();
     ta.setSelectionRange(0, ta.value.length);
     const ok = document.execCommand("copy");
@@ -76,7 +104,7 @@ async function copyTextReliable(text) {
     if (ok) return { ok: true, method: "execCommand" };
   } catch {}
 
-  // 3) prompt fallback
+  // 3) last resort prompt
   try {
     window.prompt("Copy this command:", text);
     return { ok: true, method: "prompt" };
@@ -85,53 +113,24 @@ async function copyTextReliable(text) {
   }
 }
 
-async function getSb() {
-  if (window._sbClient) return window._sbClient;
-
-  const cfg = await window.loadAppConfig();
-  if (!window.supabase || !window.supabase.createClient) {
-    console.error("❌ Supabase SDK not loaded. Check index.html script order.");
-    return null;
-  }
-
-  window._sbClient = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
-  return window._sbClient;
-}
-
-async function getAccessToken() {
-  const sb = await getSb();
-  if (!sb) return "";
-  const { data: { session } } = await sb.auth.getSession();
-  return session?.access_token || "";
-}
-
-async function getMyVmInfo(accessToken) {
-  const base = await apiBase();
-  return await fetchJson(`${base}/my_vm`, {
-    headers: { "Authorization": `Bearer ${accessToken}` }
-  });
-}
-
 // ==================================================
-// ✅ UI HELPERS
+// ✅ UI helpers (Allocate page)
 // ==================================================
 function setGateStatus(ok, msg) {
-  const gateEl = document.getElementById("allocate-agent-status");
+  const statusEl = document.getElementById("allocate-agent-status");
   const allocateBtn = document.getElementById("allocate-btn");
 
-  if (gateEl) {
-    gateEl.textContent = msg || "";
-    gateEl.style.color = ok ? "lightgreen" : "crimson";
+  if (statusEl) {
+    statusEl.textContent = msg || "";
+    statusEl.style.color = ok ? "lightgreen" : "crimson";
   }
-
-  // ✅ allocate enabled ONLY when agent online
   if (allocateBtn) allocateBtn.disabled = !ok;
 }
 
-function setBusy(isBusy, msg = "") {
-  const allocateBtn = document.getElementById("allocate-btn");
+function setAllocateBusy(isBusy, msg = "") {
   const loadingText = document.getElementById("loading-text");
   const statusMessage = document.getElementById("status-message");
+  const allocateBtn = document.getElementById("allocate-btn");
 
   if (allocateBtn) allocateBtn.disabled = !!isBusy;
 
@@ -146,16 +145,22 @@ function setBusy(isBusy, msg = "") {
   }
 }
 
-function clearStatus() {
-  const statusMessage = document.getElementById("status-message");
-  if (statusMessage) {
-    statusMessage.textContent = "";
-    statusMessage.style.color = "white";
+// ✅ On /allocate page load or Retry click: enable Allocate if Agent online
+async function updateAllocateGate() {
+  const ok = await isAgentOnline();
+  if (ok) {
+    setGateStatus(true, "✅ Local Agent is running. Click Allocate to check existing VM / create one.");
+  } else {
+    setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
   }
+
+  // ensure Allocate button is visible (in case stopped-vm UI hid it previously)
+  const allocateBtn = document.getElementById("allocate-btn");
+  if (allocateBtn) allocateBtn.style.display = "inline-block";
 }
 
 // ==================================================
-// ✅ INSTALL/RUN COMMANDS
+// ✅ Local Agent install/run commands
 // ==================================================
 function buildInstallCommand() {
   return [
@@ -193,224 +198,11 @@ function buildInstallAndRunCommand() {
 }
 
 // ==================================================
-// ✅ RESUME/NEW UI (for STOPPED VM)
-// ==================================================
-function renderStoppedVmChoices(vmInfo, accessToken) {
-  const statusMessage = document.getElementById("status-message");
-  const allocateBtn = document.getElementById("allocate-btn");
-  if (!statusMessage) return;
-
-  // Hide allocate while showing choices
-  if (allocateBtn) allocateBtn.style.display = "none";
-
-  statusMessage.style.color = "white";
-  statusMessage.innerHTML = `
-    <div style="margin-top:10px;">
-      <div style="font-weight:bold;">🟡 Existing VM is STOPPED.</div>
-      <div style="margin-top:6px;">VM ID: ${vmInfo.vm_id}</div>
-      <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <button id="resume-vm-btn" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
-          Resume stopped instance
-        </button>
-        <button id="new-vm-btn" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
-          Create new instance (terminate old)
-        </button>
-      </div>
-      <div style="margin-top:10px; font-size:13px; opacity:0.95;">
-        Creating a new instance will terminate the old one and data will be lost permanently.
-      </div>
-    </div>
-  `;
-
-  const resumeBtn = document.getElementById("resume-vm-btn");
-  const newBtn = document.getElementById("new-vm-btn");
-
-  if (resumeBtn) {
-    resumeBtn.addEventListener("click", async () => {
-      try {
-        setBusy(true, "Resuming VM... Please wait.");
-        const base = await apiBase();
-        const data = await fetchJson(`${base}/start_vm`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${accessToken}`,
-          },
-          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-        });
-
-        localStorage.setItem("vm_id", data.vm_id);
-        if (data.ip) localStorage.setItem("vm_ip", data.ip);
-
-        // after resume, go dashboard
-        window.location.href = "/status";
-      } catch (e) {
-        setBusy(false);
-        const sm = document.getElementById("status-message");
-        if (sm) {
-          sm.style.color = "crimson";
-          sm.textContent = `❌ Resume failed: ${e.message || e}`;
-        }
-      }
-    });
-  }
-
-  if (newBtn) {
-    newBtn.addEventListener("click", async () => {
-      const ok = confirm(
-        "Creating a new instance will TERMINATE your old instance and ALL data on it will be lost permanently. Continue?"
-      );
-      if (!ok) return;
-
-      try {
-        setBusy(true, "Terminating old VM...");
-        const base = await apiBase();
-
-        await fetchJson(`${base}/terminate_vm`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${accessToken}`,
-          },
-          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-        });
-
-        // Restore allocate UI
-        const allocateBtn2 = document.getElementById("allocate-btn");
-        if (allocateBtn2) {
-          allocateBtn2.style.display = "inline-block";
-          allocateBtn2.disabled = !(await isAgentOnline());
-        }
-
-        const sm = document.getElementById("status-message");
-        if (sm) {
-          sm.style.color = "white";
-          sm.textContent = "✅ Old VM terminated. Click Allocate to create a new instance.";
-        }
-
-        setBusy(false);
-      } catch (e) {
-        setBusy(false);
-        const sm = document.getElementById("status-message");
-        if (sm) {
-          sm.style.color = "crimson";
-          sm.textContent = `❌ Could not terminate old VM: ${e.message || e}`;
-        }
-      }
-    });
-  }
-}
-
-// ==================================================
-// ✅ MAIN: Allocate click flow (your exact requirement)
-// ==================================================
-async function allocateClickFlow() {
-  clearStatus();
-
-  // 0) must have agent online
-  const agentOk = await isAgentOnline();
-  if (!agentOk) {
-    setGateStatus(false, "❌ Local Agent is NOT running. Install & run it first.");
-    return;
-  }
-
-  setBusy(true, "Checking existing VM...");
-
-  const accessToken = await getAccessToken();
-  if (!accessToken) {
-    setBusy(false);
-    const sm = document.getElementById("status-message");
-    if (sm) {
-      sm.style.color = "crimson";
-      sm.textContent = "❌ Not logged in. Please login again.";
-    }
-    return;
-  }
-
-  // 1) check existing vm
-  let info;
-  try {
-    info = await getMyVmInfo(accessToken);
-  } catch (e) {
-    setBusy(false);
-    const sm = document.getElementById("status-message");
-    if (sm) {
-      sm.style.color = "crimson";
-      sm.textContent = `❌ my_vm failed: ${e.message || e}`;
-    }
-    return;
-  }
-
-  if (info.exists) {
-    if (info.vm_id) localStorage.setItem("vm_id", info.vm_id);
-    if (info.ip) localStorage.setItem("vm_ip", info.ip);
-
-    // 2a) running -> go dashboard
-    if (info.state === "running" && info.ip) {
-      setBusy(true, "✅ VM is already running. Opening dashboard...");
-      window.location.href = "/status";
-      return;
-    }
-
-    // 2b) stopped -> show buttons
-    if (info.state === "stopped" || info.state === "stopping") {
-      setBusy(false);
-      renderStoppedVmChoices(info, accessToken);
-      return;
-    }
-
-    // other state
-    setBusy(false);
-    const sm = document.getElementById("status-message");
-    if (sm) {
-      sm.style.color = "white";
-      sm.textContent = `ℹ️ Existing VM found (${info.state}). Please wait and try again.`;
-    }
-    return;
-  }
-
-  // 3) no existing vm -> allocate new
-  const ramSize = parseInt(document.getElementById("ram").value, 10);
-  setBusy(true, "Creating new VM... This may take 10-15 minutes.");
-
-  try {
-    const base = await apiBase();
-    const data = await fetchJson(`${base}/allocate`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({ ram_size: ramSize }),
-    });
-
-    // If backend returns action_required (stopped VM found server-side)
-    if (data.action_required) {
-      setBusy(false);
-      renderStoppedVmChoices({ vm_id: data.vm_id, state: data.state, ip: data.ip }, accessToken);
-      return;
-    }
-
-    localStorage.setItem("vm_id", data.vm_id);
-    if (data.ip) localStorage.setItem("vm_ip", data.ip);
-
-    setBusy(true, "✅ VM created. Opening dashboard...");
-    window.location.href = "/status";
-  } catch (e) {
-    setBusy(false);
-    const sm = document.getElementById("status-message");
-    if (sm) {
-      sm.style.color = "crimson";
-      sm.textContent = `❌ Allocation failed: ${e.message || e}`;
-    }
-  }
-}
-
-// ==================================================
-// ✅ NAVIGATION (SPA)
+// ✅ SPA Navigation
 // ==================================================
 function navigate(page, pushState = true) {
   const pages = ["login-page", "register-page", "home-page", "allocate-page"];
+
   pages.forEach((p) => {
     const el = document.getElementById(p);
     if (el) el.style.display = "none";
@@ -428,26 +220,19 @@ function navigate(page, pushState = true) {
       page === "register" ? "/register" :
       page === "home" ? "/" :
       page === "allocate" ? "/allocate" : "/";
+
     window.history.pushState({}, "", newPath);
   }
 
-  // When opening allocate page: just update gate + enable/disable allocate button.
-  // ✅ NO redirects here.
+  // IMPORTANT: do not auto-check existing VM here (user wants it on Allocate click)
   if (page === "allocate") {
     setTimeout(async () => {
-      const ok = await isAgentOnline();
-      setGateStatus(
-        ok,
-        ok
-          ? "✅ Local Agent is running. Click Allocate to continue."
-          : "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent."
-      );
-
-      // restore allocate button visibility if it was hidden by stopped-vm choices
-      const allocateBtn = document.getElementById("allocate-btn");
-      if (allocateBtn) allocateBtn.style.display = "inline-block";
-
-      // do not check /my_vm here (per your requirement)
+      await updateAllocateGate();
+      const statusMessage = document.getElementById("status-message");
+      if (statusMessage) {
+        statusMessage.style.color = "white";
+        statusMessage.textContent = "Click Allocate to check existing VM (running/stopped) or create a new VM.";
+      }
     }, 0);
   }
 }
@@ -457,14 +242,58 @@ function routeByPath() {
   if (path === "/register") return navigate("register", false);
   if (path === "/login") return navigate("login", false);
   if (path === "/allocate") return navigate("allocate", false);
-  if (path === "/" || path === "") return navigate("home", false);
+  if (path === "/") return navigate("home", false);
   return navigate("login", false);
 }
 
 window.navigate = navigate;
 
 // ==================================================
-// ✅ AUTH FUNCTIONS (GLOBAL)
+// ✅ Supabase
+// ==================================================
+async function getSb() {
+  if (window._sbClient) return window._sbClient;
+  const cfg = await window.loadAppConfig();
+
+  if (!window.supabase || !window.supabase.createClient) {
+    console.error("❌ Supabase SDK not loaded. Check index.html script order.");
+    return null;
+  }
+
+  window._sbClient = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+  return window._sbClient;
+}
+
+// ✅ DO NOT force user to Home on refresh
+async function refreshUIForSession() {
+  const sb = await getSb();
+  if (!sb) return;
+
+  const { data: { session } } = await sb.auth.getSession();
+
+  if (!session) {
+    localStorage.removeItem("sb_access_token");
+    const p = window.location.pathname.toLowerCase();
+    if (p !== "/login" && p !== "/register") navigate("login", false);
+    return;
+  }
+
+  localStorage.setItem("sb_access_token", session.access_token);
+
+  // Stay on current route
+  const path = window.location.pathname.toLowerCase();
+  if (path === "/allocate") navigate("allocate", false);
+  else if (path === "/") navigate("home", false);
+  else if (path === "/login") navigate("login", false);
+  else if (path === "/register") navigate("register", false);
+  else navigate("home", false);
+
+  const userEmailEl = document.getElementById("user-email");
+  if (userEmailEl) userEmailEl.textContent = `Logged in as: ${session.user.email}`;
+}
+
+// ==================================================
+// ✅ Auth functions (GLOBAL)
 // ==================================================
 async function registerUser() {
   const sb = await getSb();
@@ -526,7 +355,11 @@ async function login() {
       localStorage.setItem("sb_access_token", data.session.access_token);
     }
 
-    await refreshUIForSession();
+    // after login, go home (unless user explicitly browsed to /allocate)
+    const path = window.location.pathname.toLowerCase();
+    if (path === "/allocate") navigate("allocate");
+    else navigate("home");
+
   } catch (e) {
     console.error("Unexpected login exception:", e);
     if (errorEl) errorEl.textContent = "Unexpected login error. Check console.";
@@ -567,61 +400,266 @@ window.loginWithGoogle = loginWithGoogle;
 window.logout = logout;
 
 // ==================================================
-// ✅ AUTH UI REFRESH
+// ✅ Existing VM UI (stopped)
 // ==================================================
-async function refreshUIForSession() {
-  const sb = await getSb();
-  if (!sb) return;
+function renderStoppedVmChoices(vmInfo, accessToken) {
+  const statusMessage = document.getElementById("status-message");
+  const allocateBtn = document.getElementById("allocate-btn");
+  if (!statusMessage) return;
 
-  const { data: { session } } = await sb.auth.getSession();
+  // hide allocate button while choices are shown
+  if (allocateBtn) allocateBtn.style.display = "none";
 
-  if (!session) {
-    localStorage.removeItem("sb_access_token");
-    navigate("login");
-    return;
+  statusMessage.style.color = "white";
+  statusMessage.innerHTML = `
+    <div style="margin-top:10px;">
+      <div style="font-weight:bold;">🟡 Existing VM is STOPPED.</div>
+      <div style="margin-top:6px;">VM ID: ${vmInfo.vm_id}</div>
+      <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
+        <button id="resume-vm-btn" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
+          Resume stopped instance
+        </button>
+        <button id="new-vm-btn" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
+          Create new instance (terminate old)
+        </button>
+      </div>
+      <div style="margin-top:10px; font-size:13px; opacity:0.95;">
+        Creating a new instance will terminate the old one and data will be lost permanently.
+      </div>
+    </div>
+  `;
+
+  const resumeBtn = document.getElementById("resume-vm-btn");
+  const newBtn = document.getElementById("new-vm-btn");
+
+  if (resumeBtn) {
+    resumeBtn.addEventListener("click", async () => {
+      try {
+        setAllocateBusy(true, "Resuming VM...");
+
+        const base = await apiBase();
+        const data = await fetchJsonWithTimeout(`${base}/start_vm`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
+        }, 20000);
+
+        localStorage.setItem("vm_id", data.vm_id);
+        if (data.ip) localStorage.setItem("vm_ip", data.ip);
+
+        // After resume, go dashboard
+        window.location.href = "/status";
+      } catch (e) {
+        const sm = document.getElementById("status-message");
+        if (sm) {
+          sm.style.color = "crimson";
+          sm.textContent = `❌ Resume failed: ${e.message || e}`;
+        }
+      } finally {
+        setAllocateBusy(false);
+      }
+    });
   }
 
-  localStorage.setItem("sb_access_token", session.access_token);
+  if (newBtn) {
+    newBtn.addEventListener("click", async () => {
+      const ok = confirm(
+        "Creating a new instance will TERMINATE your old instance and ALL data on it will be lost permanently. Continue?"
+      );
+      if (!ok) return;
 
-  navigate("home");
-  const userEmailEl = document.getElementById("user-email");
-  if (userEmailEl) userEmailEl.textContent = `Logged in as: ${session.user.email}`;
+      try {
+        setAllocateBusy(true, "Terminating old VM...");
+
+        const base = await apiBase();
+        await fetchJsonWithTimeout(`${base}/terminate_vm`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
+        }, 20000);
+
+        // show allocate button again
+        if (allocateBtn) {
+          allocateBtn.style.display = "inline-block";
+          allocateBtn.disabled = !(await isAgentOnline());
+        }
+
+        statusMessage.style.color = "white";
+        statusMessage.textContent = "✅ Old VM terminated. Click Allocate again to create a new instance.";
+      } catch (e) {
+        statusMessage.style.color = "crimson";
+        statusMessage.textContent = `❌ Could not terminate old VM: ${e.message || e}`;
+      } finally {
+        setAllocateBusy(false);
+      }
+    });
+  }
+}
+
+// ==================================================
+// ✅ Allocate Click Flow (THIS is the only place we check existing VM)
+// ==================================================
+async function getMyVmInfoWithRetry(accessToken) {
+  const base = await apiBase();
+  const url = `${base}/my_vm`;
+  const opts = { headers: { "Authorization": `Bearer ${accessToken}` } };
+
+  // Try 1
+  try {
+    return await fetchJsonWithTimeout(url, opts, 12000);
+  } catch (e1) {
+    // Retry once
+    return await fetchJsonWithTimeout(url, opts, 12000);
+  }
+}
+
+async function allocateClickFlow() {
+  const sb = await getSb();
+  const statusMessage = document.getElementById("status-message");
+  const allocateBtn = document.getElementById("allocate-btn");
+  const ramSize = parseInt(document.getElementById("ram")?.value || "1", 10);
+
+  try {
+    if (statusMessage) {
+      statusMessage.style.color = "white";
+      statusMessage.textContent = "";
+    }
+
+    // Gate: agent must be running
+    const agentOk = await isAgentOnline();
+    if (!agentOk) {
+      setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
+      if (statusMessage) {
+        statusMessage.style.color = "crimson";
+        statusMessage.textContent = "Start Local Agent first. Allocate is disabled until Agent is running.";
+      }
+      return;
+    }
+
+    // Gate: logged in
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) {
+      navigate("login");
+      return;
+    }
+    const accessToken = session.access_token;
+    localStorage.setItem("sb_access_token", accessToken);
+
+    // Step 1: check existing VM (running/stopped)
+    setAllocateBusy(true, "Checking existing VM...");
+
+    const info = await getMyVmInfoWithRetry(accessToken);
+
+    // keep vm_id/ip in localStorage if present
+    if (info?.vm_id) localStorage.setItem("vm_id", info.vm_id);
+    if (info?.ip) localStorage.setItem("vm_ip", info.ip);
+
+    if (info?.exists) {
+      if (info.state === "running" && info.ip) {
+        if (statusMessage) {
+          statusMessage.style.color = "lightgreen";
+          statusMessage.textContent = `✅ VM is already RUNNING (${info.ip}). Opening dashboard...`;
+        }
+        await sleep(350);
+        window.location.href = "/status";
+        return;
+      }
+
+      if (info.state === "stopped" || info.state === "stopping") {
+        setAllocateBusy(false);
+        renderStoppedVmChoices(info, accessToken);
+        return;
+      }
+
+      // pending/starting etc: show message, do not allocate a new one
+      if (statusMessage) {
+        statusMessage.style.color = "white";
+        statusMessage.textContent = `⏳ Existing VM found in state: ${info.state}. Please wait and try again in a moment.`;
+      }
+      return;
+    }
+
+    // Step 2: no VM exists -> allocate new one
+    setAllocateBusy(true, "No existing VM found. Allocating new VM (can take 10–15 minutes)...");
+
+    const base = await apiBase();
+    const data = await fetchJsonWithTimeout(`${base}/allocate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ ram_size: ramSize }),
+    }, 30000);
+
+    // backend might respond action_required for stopped VM scenario
+    if (data?.action_required) {
+      setAllocateBusy(false);
+      renderStoppedVmChoices({ vm_id: data.vm_id, state: data.state, ip: data.ip }, accessToken);
+      return;
+    }
+
+    // Success allocate
+    if (data?.vm_id) localStorage.setItem("vm_id", data.vm_id);
+    if (data?.ip) localStorage.setItem("vm_ip", data.ip);
+
+    if (statusMessage) {
+      statusMessage.style.color = "lightgreen";
+      statusMessage.textContent = "✅ VM allocated. Opening dashboard...";
+    }
+    await sleep(350);
+    window.location.href = "/status";
+  } catch (err) {
+    if (statusMessage) {
+      statusMessage.style.color = "crimson";
+      statusMessage.textContent = `❌ ${err.message || err}`;
+    }
+    if (allocateBtn) allocateBtn.style.display = "inline-block";
+  } finally {
+    setAllocateBusy(false);
+    // Re-evaluate gate (sometimes button stays disabled after errors)
+    await updateAllocateGate();
+  }
 }
 
 // ==================================================
 // ✅ INIT
 // ==================================================
 document.addEventListener("DOMContentLoaded", async () => {
-  // Start on route (SPA)
+  // initial route
   routeByPath();
 
   const sb = await getSb();
   if (!sb) return;
 
-  // If auth changes, refresh UI
-  sb.auth.onAuthStateChange(async () => {
-    await refreshUIForSession();
-  });
-
+  // keep route, don’t auto-bounce to home on refresh
   await refreshUIForSession();
 
-  // Allocate click (ONLY triggers VM logic)
+  // if user is on allocate after refresh, make sure gate is correct
+  if (window.location.pathname.toLowerCase() === "/allocate") {
+    await updateAllocateGate();
+  }
+
+  sb.auth.onAuthStateChange(async () => {
+    await refreshUIForSession();
+    if (window.location.pathname.toLowerCase() === "/allocate") {
+      await updateAllocateGate();
+    }
+  });
+
+  // Allocate click
   const allocateBtn = document.getElementById("allocate-btn");
   if (allocateBtn) allocateBtn.addEventListener("click", allocateClickFlow);
 
-  // Retry Agent: only checks agent + enables Allocate; ✅ NO redirect
+  // Retry agent button: ONLY updates gate; does NOT auto-redirect
   const retry = document.getElementById("allocate-agent-retry");
-  if (retry) {
-    retry.addEventListener("click", async () => {
-      const ok = await isAgentOnline();
-      setGateStatus(
-        ok,
-        ok
-          ? "✅ Local Agent is running. Click Allocate to continue."
-          : "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent."
-      );
-    });
-  }
+  if (retry) retry.addEventListener("click", updateAllocateGate);
 
   // Install & Run: reliable copy
   const installRun = document.getElementById("allocate-install-run");
@@ -629,10 +667,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     installRun.addEventListener("click", async () => {
       const cmd = buildInstallAndRunCommand();
       const res = await copyTextReliable(cmd);
-      setGateStatus(false, res.ok
-        ? `📋 Install & Run command copied (${res.method}). Paste into PowerShell, then click Retry Agent.`
-        : "❌ Could not copy automatically. Open console for the command."
+
+      setGateStatus(false,
+        res.ok
+          ? `📋 Install & Run command copied (${res.method}). Paste into PowerShell, then click Retry Agent.`
+          : "❌ Could not copy automatically. Open console for the command."
       );
+
       if (!res.ok) console.log("INSTALL+RUN CMD:\n", cmd);
     });
   }
