@@ -6,7 +6,6 @@ console.log("✅ script.js loaded");
 // ==================================================
 async function apiBase() {
   const cfg = await window.loadAppConfig();
-  // Render backend (FastAPI) base
   return (cfg.API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 }
 
@@ -18,7 +17,9 @@ function agentBase() {
 const AGENT_ZIP_URL =
   "https://github.com/Muvvakotesh2000/cloudramsaas-LocalAgent/archive/refs/heads/main.zip";
 
-// Small helper: fetch JSON + good errors
+// ------------------------------
+// Helpers
+// ------------------------------
 async function fetchJson(url, opts = {}) {
   const r = await fetch(url, opts);
   const text = await r.text();
@@ -33,7 +34,6 @@ async function fetchJson(url, opts = {}) {
   return data;
 }
 
-// Check if Local Agent is running
 async function isAgentOnline() {
   try {
     const r = await fetch(`${agentBase()}/health`, { cache: "no-store" });
@@ -43,10 +43,52 @@ async function isAgentOnline() {
   }
 }
 
+// Clipboard copy that *always* gives the user a path to copy.
+// - tries navigator.clipboard (requires secure context / user gesture)
+// - falls back to a hidden textarea + execCommand
+// - if that fails, shows a prompt
+async function copyTextReliable(text) {
+  // 1) modern clipboard
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return { ok: true, method: "clipboard" };
+    }
+  } catch (e) {
+    // continue to fallback
+  }
+
+  // 2) fallback textarea
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+
+    if (ok) return { ok: true, method: "execCommand" };
+  } catch (e) {
+    // continue
+  }
+
+  // 3) last resort prompt
+  try {
+    window.prompt("Copy this command:", text);
+    return { ok: true, method: "prompt" };
+  } catch {
+    return { ok: false, method: "none" };
+  }
+}
+
 // ==================================================
-// ✅ ALLOCATE PAGE: Local Agent Gate + Install&Run (merged) + Retry
-//   - (Removed) Download ZIP button (HTML removed)
-//   - (Removed) Autostart button + command (HTML removed)
+// ✅ ALLOCATE PAGE: Local Agent Gate + Install&Run + Retry
 // ==================================================
 function buildInstallCommand() {
   return [
@@ -57,7 +99,6 @@ function buildInstallCommand() {
     `Invoke-WebRequest -Uri "${AGENT_ZIP_URL}" -OutFile "$env:TEMP\\LocalAgent.zip"`,
     'Write-Host "Extracting..."',
     'Expand-Archive -Path "$env:TEMP\\LocalAgent.zip" -DestinationPath $dest -Force',
-    // GitHub zip contains a root folder like cloudramsaas-LocalAgent-main
     '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
     'if (-not $root) { throw "Could not find extracted folder inside destination." }',
     'Set-Location $root.FullName',
@@ -80,9 +121,7 @@ function buildRunCommand() {
   ].join(" ; ");
 }
 
-// ✅ New: merged "Install & Run Agent" command
 function buildInstallAndRunCommand() {
-  // Install then immediately run
   return `${buildInstallCommand()} ; ${buildRunCommand()}`;
 }
 
@@ -98,6 +137,8 @@ function setAllocateGateUI({ ok, msg }) {
   if (allocateBtn) allocateBtn.disabled = !ok;
 }
 
+// ✅ Only redirect to /status if agent is online.
+// This is the single source of truth for gating.
 async function enforceAgentGateOnAllocate() {
   const panel = document.getElementById("allocate-agent-panel");
   if (!panel) return;
@@ -109,7 +150,6 @@ async function enforceAgentGateOnAllocate() {
       msg: "✅ Local Agent is running. Redirecting to status..."
     });
 
-    // ✅ Requirement: only after agent is successfully running, redirect to status
     setTimeout(() => {
       window.location.href = "/status";
     }, 400);
@@ -122,7 +162,7 @@ async function enforceAgentGateOnAllocate() {
 }
 
 // ==================================================
-// ✅ NAVIGATION (DEFINE FIRST + GLOBAL)
+// ✅ NAVIGATION
 // ==================================================
 function navigate(page, pushState = true) {
   const pages = ["login-page", "register-page", "home-page", "allocate-page"];
@@ -150,16 +190,22 @@ function navigate(page, pushState = true) {
 
   if (page === "allocate") {
     setTimeout(async () => {
-      // Show agent status, but DO NOT redirect automatically here
-      // Redirect should happen only after user clicks Retry (or if they land on /allocate directly below).
       const ok = await isAgentOnline();
       if (ok) {
-        setAllocateGateUI({ ok: true, msg: "✅ Local Agent is running. Click Allocate to continue (or Retry to go to status)." });
+        setAllocateGateUI({
+          ok: true,
+          msg: "✅ Local Agent is running. Click Allocate to continue (or Retry to go to status)."
+        });
       } else {
-        setAllocateGateUI({ ok: false, msg: "❌ Local Agent is NOT running. Install & run it, then click Retry." });
+        setAllocateGateUI({
+          ok: false,
+          msg: "❌ Local Agent is NOT running. Install & run it, then click Retry."
+        });
       }
 
-      await checkExistingVmAndRenderChoices(); // existing VM logic
+      // IMPORTANT: DO NOT redirect from here.
+      // Only redirect after Retry (enforceAgentGateOnAllocate), OR after successful Allocate.
+      await checkExistingVmAndRenderChoices();
     }, 0);
   }
 }
@@ -385,6 +431,15 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
         localStorage.setItem("vm_id", data.vm_id);
         localStorage.setItem("vm_ip", data.ip);
 
+        // ✅ Gate redirect on Agent
+        const ok = await isAgentOnline();
+        if (!ok) {
+          statusMessage.style.color = "crimson";
+          statusMessage.textContent = "✅ VM resumed, but Local Agent is not running. Start it and click Retry Agent to open dashboard.";
+          setAllocateUIBusy(false);
+          return;
+        }
+
         window.location.href = "/status";
       } catch (e) {
         statusMessage.style.color = "red";
@@ -432,6 +487,9 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
   }
 }
 
+// ✅ IMPORTANT CHANGE:
+// - If VM is RUNNING, we do NOT auto-redirect to /status unless agent is online.
+// - We show a message telling user to run agent and click Retry.
 async function checkExistingVmAndRenderChoices() {
   const sb = await getSb();
   const statusMessage = document.getElementById("status-message");
@@ -452,6 +510,7 @@ async function checkExistingVmAndRenderChoices() {
 
     if (!info.exists) {
       allocateBtn.style.display = "inline-block";
+      allocateBtn.disabled = !(await isAgentOnline());
       return;
     }
 
@@ -464,8 +523,21 @@ async function checkExistingVmAndRenderChoices() {
     }
 
     if (info.state === "running" && info.ip) {
+      const agentOk = await isAgentOnline();
+
+      if (!agentOk) {
+        // ✅ NO redirect if agent is not running
+        statusMessage.style.color = "crimson";
+        statusMessage.textContent =
+          `⚠️ VM is running (${info.ip}) but Local Agent is NOT running. Start the agent, then click "Retry Agent" to open dashboard.`;
+        // Keep user on allocate page; allocate button should remain disabled.
+        allocateBtn.style.display = "inline-block";
+        allocateBtn.disabled = true;
+        return;
+      }
+
       statusMessage.style.color = "white";
-      statusMessage.textContent = `✅ You already have a running VM (${info.ip}). Redirecting to dashboard...`;
+      statusMessage.textContent = `✅ VM is running (${info.ip}). Redirecting to dashboard...`;
       setTimeout(() => (window.location.href = "/status"), 800);
       return;
     }
@@ -504,7 +576,7 @@ async function allocateRAM() {
 
     // ✅ Enforce Local Agent
     const agentOk = await isAgentOnline();
-    if (!agentOk) throw new Error("Local Agent is not running. Start it and Retry.");
+    if (!agentOk) throw new Error("Local Agent is not running. Start it and click Retry Agent.");
 
     const base = await apiBase();
     const data = await fetchJson(`${base}/allocate`, {
@@ -527,6 +599,16 @@ async function allocateRAM() {
     statusMessage.textContent = "RAM allocated successfully!";
     localStorage.setItem("vm_ip", data.ip);
     localStorage.setItem("vm_id", data.vm_id);
+
+    // ✅ Gate redirect on Agent
+    const ok = await isAgentOnline();
+    if (!ok) {
+      statusMessage.style.color = "crimson";
+      statusMessage.textContent =
+        "✅ VM created, but Local Agent is not running. Start the agent, then click Retry Agent to open dashboard.";
+      allocateBtn.disabled = true;
+      return;
+    }
 
     window.location.href = "/status";
   } catch (err) {
@@ -562,34 +644,38 @@ document.addEventListener("DOMContentLoaded", async () => {
   const allocateBtn = document.getElementById("allocate-btn");
   if (allocateBtn) allocateBtn.addEventListener("click", allocateRAM);
 
-  // Allocate page: wire agent gate buttons
+  // Retry agent button: only place that redirects to /status when agent is ok
   const retry = document.getElementById("allocate-agent-retry");
   if (retry) retry.addEventListener("click", enforceAgentGateOnAllocate);
 
-  // ✅ NEW: Install & Run merged button
+  // ✅ Install & Run: reliable copy (never silently fails)
   const installRun = document.getElementById("allocate-install-run");
-  if (installRun) installRun.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(buildInstallAndRunCommand());
+  if (installRun) {
+    installRun.addEventListener("click", async () => {
+      const cmd = buildInstallAndRunCommand();
+      const res = await copyTextReliable(cmd);
+
       setAllocateGateUI({
         ok: false,
-        msg: "📋 Install & Run command copied. Paste into PowerShell to install + start the agent, then click Retry."
+        msg:
+          res.ok
+            ? `📋 Install & Run command copied (${res.method}). Paste into PowerShell, then click Retry Agent.`
+            : "❌ Could not copy automatically. Open console for the command."
       });
-    } catch {
-      setAllocateGateUI({ ok: false, msg: "❌ Could not copy. Open console for command." });
-      console.log("INSTALL+RUN CMD:\n", buildInstallAndRunCommand());
-    }
-  });
+
+      if (!res.ok) console.log("INSTALL+RUN CMD:\n", cmd);
+    });
+  }
 
   // If user lands directly on /allocate
   if (window.location.pathname.toLowerCase() === "/allocate") {
-    // Only redirect after explicit Retry click (enforceAgentGateOnAllocate handles redirect when ok)
     const ok = await isAgentOnline();
     if (ok) {
-      setAllocateGateUI({ ok: true, msg: "✅ Local Agent is running. Click Retry to go to status, or Allocate to continue." });
+      setAllocateGateUI({ ok: true, msg: "✅ Local Agent is running. Click Retry Agent to go to dashboard, or Allocate to continue." });
     } else {
-      setAllocateGateUI({ ok: false, msg: "❌ Local Agent is NOT running. Install & run it, then click Retry." });
+      setAllocateGateUI({ ok: false, msg: "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent." });
     }
+
     await checkExistingVmAndRenderChoices();
   }
 });
