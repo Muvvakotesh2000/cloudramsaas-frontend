@@ -454,11 +454,23 @@
       const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
 
+      // Get user_id from Supabase session
+      const sb = window._sbClient;
+      const { data: { user } } = await sb.auth.getUser();
+      const user_id = user?.id;
+
+      if (!user_id) throw new Error("Could not determine user_id.");
+
       const data = await fetchJson(`${AGENT_BASE}/migrate_vscode`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ access_token, vm_ip: vmIp })
+        body: JSON.stringify({
+          access_token,
+          vm_ip: vmIp,
+          user_id
+        })
       });
+
 
       statusEl.style.color = "lightgreen";
       statusEl.textContent = `✅ VSCode migrated. Opened on VM: ${data.opened_path || "unknown"}`;
