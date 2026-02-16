@@ -1,665 +1,109 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Cloud RAM Dashboard - Enterprise Management Console</title>
+  <title>Cloud RAM Dashboard</title>
 
   <!-- Supabase + auth helper -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="/static/config.js" defer></script>
   <script src="/static/status_auth.js?v=6" defer></script>
 
-  <!-- Google Fonts -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    :root {
-      --primary: #2563eb;
-      --primary-dark: #1e40af;
-      --primary-light: #3b82f6;
-      --secondary: #7c3aed;
-      --success: #10b981;
-      --error: #ef4444;
-      --warning: #f59e0b;
-      --info: #06b6d4;
-      --bg-primary: #0f172a;
-      --bg-secondary: #1e293b;
-      --bg-tertiary: #334155;
-      --text-primary: #f8fafc;
-      --text-secondary: #cbd5e1;
-      --text-muted: #94a3b8;
-      --border: #334155;
-      --shadow: rgba(0, 0, 0, 0.3);
-    }
-
     body {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-      color: var(--text-primary);
-      min-height: 100vh;
-      padding: 0;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #1e3c72, #2a5298);
+      color: #fff;
       margin: 0;
-      position: relative;
-    }
-
-    body::before {
-      content: '';
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: 
-        radial-gradient(circle at 20% 50%, rgba(37, 99, 235, 0.1) 0%, transparent 50%),
-        radial-gradient(circle at 80% 80%, rgba(124, 58, 237, 0.1) 0%, transparent 50%);
-      pointer-events: none;
-      z-index: 0;
-    }
-
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 2rem;
-      position: relative;
-      z-index: 1;
-    }
-
-    /* Header */
-    .header {
-      text-align: center;
-      margin-bottom: 3rem;
-      animation: fadeInDown 0.6s ease;
-    }
-
-    .header h1 {
-      font-size: 2.5rem;
-      font-weight: 700;
-      background: linear-gradient(135deg, var(--primary-light), var(--secondary));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-      margin-bottom: 0.5rem;
-    }
-
-    .header-subtitle {
-      color: var(--text-muted);
-      font-size: 1rem;
-    }
-
-    /* Status Card */
-    .status-card {
-      background: rgba(30, 41, 59, 0.6);
-      backdrop-filter: blur(20px);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 2rem;
-      margin-bottom: 2rem;
-      box-shadow: 0 20px 25px -5px var(--shadow);
-      animation: fadeInUp 0.6s ease;
-    }
-
-    .status-header {
+      padding: 20px;
       display: flex;
+      flex-direction: column;
       align-items: center;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
+      min-height: 100vh;
     }
-
-    .status-icon {
-      width: 48px;
-      height: 48px;
-      border-radius: 12px;
-      background: linear-gradient(135deg, var(--primary), var(--primary-light));
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 1.5rem;
-      box-shadow: 0 8px 16px -4px rgba(37, 99, 235, 0.4);
-    }
-
-    .status-title {
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: var(--text-primary);
-    }
-
-    #status-text {
-      color: var(--text-secondary);
-      line-height: 1.8;
-      font-size: 0.95rem;
-    }
-
-    /* Grid Layout */
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 2rem;
-      margin-bottom: 2rem;
-    }
-
-    /* Card */
-    .card {
-      background: rgba(30, 41, 59, 0.6);
-      backdrop-filter: blur(20px);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 2rem;
-      box-shadow: 0 20px 25px -5px var(--shadow);
-      animation: fadeInUp 0.6s ease;
-      transition: transform 0.3s ease, box-shadow 0.3s ease;
-    }
-
-    .card:hover {
-      transform: translateY(-4px);
-      box-shadow: 0 24px 30px -5px var(--shadow);
-    }
-
-    .card-header {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 1.5rem;
-      padding-bottom: 1rem;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .card-icon {
-      font-size: 1.5rem;
-    }
-
-    .card-title {
-      font-size: 1.1rem;
-      font-weight: 600;
-      color: var(--text-primary);
-    }
-
-    /* Buttons */
-    .button {
-      padding: 0.75rem 1.5rem;
-      background: linear-gradient(135deg, var(--primary), var(--primary-light));
-      color: white;
-      border: none;
-      border-radius: 10px;
-      font-size: 0.9rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.3s ease;
-      font-family: inherit;
-      position: relative;
-      overflow: hidden;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .button::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: -100%;
-      width: 100%;
-      height: 100%;
-      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
-      transition: left 0.5s ease;
-    }
-
-    .button:hover::before {
-      left: 100%;
-    }
-
-    .button:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 10px 20px -5px rgba(37, 99, 235, 0.4);
-    }
-
-    .button:active {
-      transform: translateY(0);
-    }
-
-    .button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-      transform: none !important;
-    }
-
-    .danger {
-      background: linear-gradient(135deg, var(--error), #dc2626);
-    }
-
-    .danger:hover {
-      box-shadow: 0 10px 20px -5px rgba(239, 68, 68, 0.4);
-    }
-
-    .button-secondary {
-      background: transparent;
-      border: 1px solid var(--border);
-      color: var(--text-secondary);
-    }
-
-    .button-secondary:hover {
-      background: rgba(37, 99, 235, 0.1);
-      border-color: var(--primary);
-      color: var(--text-primary);
-    }
-
-    .button-group {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.75rem;
-      margin-top: 1rem;
-    }
-
-    /* Spinner */
     .spinner {
       display: inline-block;
-      width: 20px;
-      height: 20px;
-      border: 3px solid rgba(255, 255, 255, 0.3);
+      width: 24px;
+      height: 24px;
+      border: 3px solid #fff;
       border-radius: 50%;
-      border-top-color: var(--primary-light);
+      border-top: 3px solid #00c4cc;
       animation: spin 1s linear infinite;
+      margin-left: 10px;
+      vertical-align: middle;
     }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
-    @keyframes spin { 
-      to { transform: rotate(360deg); } 
-    }
-
-    /* Select/Dropdown */
-    select {
-      width: 100%;
-      padding: 0.75rem;
-      background: rgba(15, 23, 42, 0.5);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      color: var(--text-primary);
-      font-size: 0.95rem;
-      font-family: inherit;
-      min-height: 150px;
-      transition: all 0.3s ease;
-    }
-
-    select:focus {
-      outline: none;
-      border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-      background: rgba(15, 23, 42, 0.7);
-    }
-
-    select option {
-      padding: 0.5rem;
-      background: var(--bg-secondary);
-      color: var(--text-primary);
-    }
-
-    /* Status Messages */
-    .status-message {
-      margin-top: 1rem;
-      padding: 0.875rem 1.25rem;
-      border-radius: 10px;
-      font-size: 0.9rem;
-      font-weight: 500;
-      animation: fadeIn 0.3s ease;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .status-message.success {
-      background: rgba(16, 185, 129, 0.1);
-      border: 1px solid rgba(16, 185, 129, 0.3);
-      color: #6ee7b7;
-    }
-
-    .status-message.error {
-      background: rgba(239, 68, 68, 0.1);
-      border: 1px solid rgba(239, 68, 68, 0.3);
-      color: #fca5a5;
-    }
-
-    .status-message.warning {
-      background: rgba(245, 158, 11, 0.1);
-      border: 1px solid rgba(245, 158, 11, 0.3);
-      color: #fcd34d;
-    }
-
-    .status-message.info {
-      background: rgba(6, 182, 212, 0.1);
-      border: 1px solid rgba(6, 182, 212, 0.3);
-      color: #67e8f9;
-    }
-
-    /* Loading Text */
-    #task-loading,
-    #vnc-loading {
-      color: var(--text-muted);
-      font-size: 0.9rem;
-      padding: 1rem;
-      text-align: center;
-      animation: pulse 2s ease infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
-    }
-
-    /* VNC Section */
-    .vnc-section {
-      margin-top: 2rem;
-    }
-
-    #vnc-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      text-decoration: none;
-      margin-top: 1rem;
-    }
-
-    /* Code */
-    code {
-      background: rgba(15, 23, 42, 0.8);
-      padding: 0.25rem 0.5rem;
-      border-radius: 4px;
-      font-size: 0.85rem;
-      color: var(--primary-light);
-      font-family: 'Monaco', 'Courier New', monospace;
-    }
-
-    /* Badge */
-    .badge {
-      display: inline-block;
-      padding: 0.25rem 0.75rem;
+    .button {
+      background-color: #00c4cc;
+      border: none;
+      color: white;
+      padding: 10px 18px;
+      margin: 8px 4px;
+      font-size: 16px;
       border-radius: 6px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
+      cursor: pointer;
+      transition: background 0.3s ease;
     }
+    .button:hover { background-color: #009fa3; }
+    .button:disabled { background-color: #999; cursor: not-allowed; opacity: 0.6; }
+    .danger { background-color: #ff5b5b; }
+    .danger:hover { background-color: #e04747; }
 
-    .badge.success {
-      background: rgba(16, 185, 129, 0.2);
-      color: #6ee7b7;
-    }
+    iframe { width: 100%; height: 500px; border: none; }
+    #tasks { min-width: 320px; min-height: 140px; }
 
-    .badge.error {
-      background: rgba(239, 68, 68, 0.2);
-      color: #fca5a5;
-    }
-
-    .badge.warning {
-      background: rgba(245, 158, 11, 0.2);
-      color: #fcd34d;
-    }
-
-    /* Info Box */
-    .info-box {
-      background: rgba(37, 99, 235, 0.1);
-      border: 1px solid rgba(37, 99, 235, 0.3);
+    .panel {
+      width: min(920px, 95vw);
+      background: rgba(255,255,255,0.10);
+      border: 1px solid rgba(255,255,255,0.20);
       border-radius: 10px;
-      padding: 1rem;
-      margin: 1rem 0;
-      font-size: 0.9rem;
-      color: var(--text-secondary);
-      line-height: 1.6;
+      padding: 14px 16px;
+      margin-top: 12px;
     }
-
-    .info-box strong {
-      color: var(--primary-light);
-      display: block;
-      margin-bottom: 0.5rem;
-    }
-
-    /* Animations */
-    @keyframes fadeInUp {
-      from {
-        opacity: 0;
-        transform: translateY(30px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-
-    @keyframes fadeInDown {
-      from {
-        opacity: 0;
-        transform: translateY(-30px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-
-    @keyframes fadeIn {
-      from { opacity: 0; }
-      to { opacity: 1; }
-    }
-
-    /* Responsive */
-    @media (max-width: 768px) {
-      .container {
-        padding: 1rem;
-      }
-
-      .header h1 {
-        font-size: 2rem;
-      }
-
-      .grid {
-        grid-template-columns: 1fr;
-        gap: 1.5rem;
-      }
-
-      .card {
-        padding: 1.5rem;
-      }
-
-      .status-card {
-        padding: 1.5rem;
-      }
-
-      .button-group {
-        flex-direction: column;
-      }
-
-      .button-group .button {
-        width: 100%;
-      }
-    }
-
-    /* Section Divider */
-    .section-divider {
-      height: 1px;
-      background: linear-gradient(90deg, transparent, var(--border), transparent);
-      margin: 3rem 0;
-    }
-
-    /* Empty State */
-    .empty-state {
-      text-align: center;
-      padding: 3rem 1rem;
-      color: var(--text-muted);
-    }
-
-    .empty-state-icon {
-      font-size: 3rem;
-      margin-bottom: 1rem;
-      opacity: 0.5;
-    }
-
-    /* Metric Cards */
-    .metric-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 1rem;
-      margin: 1.5rem 0;
-    }
-
-    .metric-card {
-      background: rgba(15, 23, 42, 0.4);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 1.25rem;
-      transition: all 0.3s ease;
-    }
-
-    .metric-card:hover {
-      background: rgba(15, 23, 42, 0.6);
-      border-color: var(--primary);
-    }
-
-    .metric-label {
-      font-size: 0.8rem;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 0.5rem;
-    }
-
-    .metric-value {
-      font-size: 1.75rem;
-      font-weight: 700;
-      color: var(--text-primary);
-    }
-
-    .metric-unit {
-      font-size: 0.9rem;
-      color: var(--text-muted);
-      margin-left: 0.25rem;
+    .muted { opacity: 0.9; font-size: 13px; }
+    .ok { color: lightgreen; }
+    .bad { color: #ffb3b3; }
+    code {
+      background: rgba(0,0,0,0.25);
+      padding: 2px 6px;
+      border-radius: 6px;
     }
   </style>
 </head>
 
 <body>
-  <div class="container">
-    <!-- Header -->
-    <div class="header">
-      <h1>☁️ Cloud RAM Dashboard</h1>
-      <p class="header-subtitle">Enterprise Management Console</p>
+  <h1>Cloud RAM Dashboard</h1>
+  <div id="status-text">Loading...</div>
+
+  <div style="margin-top:12px;">
+    <button class="button danger" id="stop-vm-btn">Stop VM</button>
+    <span id="stop-spinner" style="display:none;" class="spinner"></span>
+    <p id="stop-status" style="margin-top: 10px; font-weight: bold;"></p>
+  </div>
+
+  <h2>Running Tasks</h2>
+  <div id="tasks-container">
+    <p id="task-loading">Fetching tasks...</p>
+    <select id="tasks" multiple></select>
+    <div>
+      <button class="button" id="migrate-btn">Migrate Selected Tasks</button>
+      <span id="migration-spinner" style="display:none;" class="spinner"></span>
+      <p id="migration-status" style="margin-top: 10px; font-weight: bold;"></p>
+
+      <button class="button" id="migrate-vscode-btn" style="display:none;">Migrate VSCode Project</button>
+      <span id="vscode-spinner" style="display:none;" class="spinner"></span>
+      <p id="vscode-status" style="margin-top: 10px; font-weight: bold;"></p>
+
+      <button class="button" id="save-local-btn">Save Project to Local</button>
+      <span id="save-local-spinner" style="display:none;" class="spinner"></span>
+      <p id="save-local-status" style="margin-top: 10px; font-weight: bold;"></p>
     </div>
+  </div>
 
-    <!-- Status Card -->
-    <div class="status-card">
-      <div class="status-header">
-        <div class="status-icon">📊</div>
-        <div class="status-title">VM Status & Resource Monitoring</div>
-      </div>
-      <div id="status-text">⏳ Loading VM information...</div>
-    </div>
-
-    <!-- VM Control Section -->
-    <div class="card">
-      <div class="card-header">
-        <span class="card-icon">⚡</span>
-        <span class="card-title">VM Control Panel</span>
-      </div>
-      
-      <div class="info-box">
-        <strong>⚠️ Important</strong>
-        Stopping the VM will terminate all running processes. Make sure to save your work before proceeding.
-      </div>
-
-      <div class="button-group">
-        <button class="button danger" id="stop-vm-btn">
-          🛑 Stop VM
-        </button>
-        <span id="stop-spinner" style="display:none;" class="spinner"></span>
-      </div>
-      
-      <div id="stop-status-container"></div>
-    </div>
-
-    <div class="section-divider"></div>
-
-    <!-- Tasks Grid -->
-    <div class="grid">
-      <!-- Running Tasks Card -->
-      <div class="card">
-        <div class="card-header">
-          <span class="card-icon">📋</span>
-          <span class="card-title">Running Tasks</span>
-        </div>
-
-        <div id="tasks-container">
-          <p id="task-loading">⏳ Fetching tasks from local agent...</p>
-          <select id="tasks" multiple></select>
-          
-          <div class="button-group">
-            <button class="button" id="migrate-btn">
-              🔄 Migrate Selected Tasks
-            </button>
-            <span id="migration-spinner" style="display:none;" class="spinner"></span>
-          </div>
-          
-          <div id="migration-status-container"></div>
-        </div>
-      </div>
-
-      <!-- VSCode & Projects Card -->
-      <div class="card">
-        <div class="card-header">
-          <span class="card-icon">💻</span>
-          <span class="card-title">Development Tools</span>
-        </div>
-
-        <div class="info-box">
-          <strong>🎯 Quick Actions</strong>
-          Migrate your VSCode workspace or save projects to your local machine.
-        </div>
-
-        <div class="button-group">
-          <button class="button" id="migrate-vscode-btn" style="display:none;">
-            🚀 Migrate VSCode Project
-          </button>
-          <span id="vscode-spinner" style="display:none;" class="spinner"></span>
-        </div>
-        
-        <div id="vscode-status-container"></div>
-
-        <div class="button-group" style="margin-top: 1rem;">
-          <button class="button button-secondary" id="save-local-btn">
-            💾 Save Project to Local
-          </button>
-          <span id="save-local-spinner" style="display:none;" class="spinner"></span>
-        </div>
-        
-        <div id="save-local-status-container"></div>
-      </div>
-    </div>
-
-    <div class="section-divider"></div>
-
-    <!-- VNC Section -->
-    <div class="card vnc-section">
-      <div class="card-header">
-        <span class="card-icon">🖥️</span>
-        <span class="card-title">VM GUI Access (VNC)</span>
-      </div>
-
-      <div class="info-box">
-        <strong>🔒 Secure Remote Access</strong>
-        Access your VM's graphical interface through VNC. The connection opens in a new browser tab for security.
-      </div>
-
-      <div id="vnc-container">
-        <p id="vnc-loading">🔄 Initializing VNC connection...</p>
-        <a id="vnc-link" class="button" target="_blank" rel="noopener" style="display:none;">
-          🖥️ Open VM GUI (VNC)
-        </a>
-      </div>
-    </div>
+  <h2>VM GUI (VNC)</h2>
+  <div id="vnc-container">
+    <p id="vnc-loading">VNC ready.</p>
+    <a id="vnc-link" class="button" target="_blank" rel="noopener" style="display:none;">Open VM GUI (VNC)</a>
   </div>
 
 <script>
@@ -700,6 +144,8 @@
   }
 
   async function getAccessToken() {
+    // status_auth.js should have already initialized supabase and headers,
+    // but simplest: use your existing helper if present
     if (window.getAuthHeaders) {
       const h = await window.getAuthHeaders();
       const auth = h.Authorization || h.authorization || "";
@@ -716,19 +162,6 @@
     const user_id = user?.id;
     if (!user_id) throw new Error("Could not determine user_id.");
     return user_id;
-  }
-
-  // ✅ Helper to create status messages
-  function createStatusMessage(containerId, message, type = 'info') {
-    const container = document.getElementById(containerId);
-    if (!container) return;
-    
-    const statusDiv = document.createElement('div');
-    statusDiv.className = `status-message ${type}`;
-    statusDiv.innerHTML = message;
-    
-    container.innerHTML = '';
-    container.appendChild(statusDiv);
   }
 
   // ========= Dashboard init =========
@@ -770,7 +203,7 @@
 
       if ((info.state === "running" || info.state === "pending") && !info.ip) {
         document.getElementById("status-text").innerHTML =
-          `⏳ VM is <span class="badge warning">${info.state}</span>. Waiting for public IP... <span class="badge info">try ${i}/${maxTries}</span>`;
+          `⏳ VM is ${info.state}. Waiting for public IP... (try ${i}/${maxTries})`;
         await new Promise(r => setTimeout(r, delayMs));
         continue;
       }
@@ -783,13 +216,13 @@
 
   async function initDashboard() {
     try {
-      document.getElementById("status-text").innerHTML = "⏳ Loading VM information...";
+      document.getElementById("status-text").innerHTML = "⏳ Loading VM info...";
 
       const info = await fetchMyVmWithRetries(36, 5000);
 
       if (!info.exists) {
         document.getElementById("status-text").innerHTML =
-          '<div class="empty-state"><div class="empty-state-icon">🚫</div><p>No VM found for your account.</p><p style="margin-top: 0.5rem; font-size: 0.9rem;">Go to <strong>Allocate</strong> page and create one.</p></div>';
+          "❌ No VM found for your account. Go to Allocate page and create one.";
         return;
       }
 
@@ -801,13 +234,13 @@
 
       if (info.state === "stopped" || info.state === "stopping") {
         document.getElementById("status-text").innerHTML =
-          `<div class="empty-state"><div class="empty-state-icon">⏸️</div><p>VM is <span class="badge warning">${info.state}</span></p><p style="margin-top: 0.5rem; font-size: 0.9rem;">Go to <strong>Allocate</strong> page and click <strong>Resume</strong>.</p></div>`;
+          `🟡 VM is ${info.state}. Go to Allocate page and click Resume.`;
         return;
       }
 
       if (!vmIp) {
         document.getElementById("status-text").innerHTML =
-          '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>VM exists but has no IP yet.</p><p style="margin-top: 0.5rem; font-size: 0.9rem;">Please wait and refresh.</p></div>';
+          "⚠️ VM exists but has no IP yet. Please wait and refresh.";
         return;
       }
 
@@ -821,8 +254,8 @@
       const agentOk = await isAgentOnline();
       if (!agentOk) {
         const loadingText = document.getElementById("task-loading");
-        loadingText.style.color = "var(--error)";
-        loadingText.innerHTML = '❌ <strong>Local Agent not running.</strong> Start it to load tasks.';
+        loadingText.style.color = "crimson";
+        loadingText.innerText = "❌ Local Agent not running. Start it to load tasks.";
         return;
       }
 
@@ -830,8 +263,7 @@
 
     } catch (e) {
       console.error("initDashboard failed:", e);
-      document.getElementById("status-text").innerHTML = 
-        `<div class="status-message error">❌ ${e.message || e}</div>`;
+      document.getElementById("status-text").innerHTML = `❌ ${e.message || e}`;
     }
   }
 
@@ -846,31 +278,11 @@
     }
 
     const data = await response.json();
-    
-    const totalGB = (data.total_ram / (1024 ** 3)).toFixed(2);
-    const usedGB = (data.used_ram / (1024 ** 3)).toFixed(2);
-    const availableGB = (data.available_ram / (1024 ** 3)).toFixed(2);
-    
     document.getElementById("status-text").innerHTML = `
-      <div style="margin-bottom: 1rem;">
-        <span class="badge success">✅ RUNNING</span>
-        <code style="margin-left: 0.5rem;">${vmIp}</code>
-      </div>
-      <div class="metric-grid">
-        <div class="metric-card">
-          <div class="metric-label">Total RAM</div>
-          <div class="metric-value">${totalGB}<span class="metric-unit">GB</span></div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Used RAM</div>
-          <div class="metric-value">${usedGB}<span class="metric-unit">GB</span></div>
-          <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem;">${data.percent_used}% utilized</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Available RAM</div>
-          <div class="metric-value">${availableGB}<span class="metric-unit">GB</span></div>
-        </div>
-      </div>
+      ✅ Cloud RAM Running at ${vmIp} <br>
+      🔹 Total RAM: ${(data.total_ram / (1024 ** 3)).toFixed(2)} GB<br>
+      🔹 Used RAM: ${(data.used_ram / (1024 ** 3)).toFixed(2)} GB (${data.percent_used}%)<br>
+      🔹 Available RAM: ${(data.available_ram / (1024 ** 3)).toFixed(2)} GB
     `;
   }
 
@@ -880,8 +292,11 @@
   async function stopVmNow() {
     const stopBtn = document.getElementById("stop-vm-btn");
     const spinner = document.getElementById("stop-spinner");
+    const statusEl = document.getElementById("stop-status");
 
     try {
+      statusEl.textContent = "";
+      statusEl.style.color = "white";
       spinner.style.display = "inline-block";
       stopBtn.disabled = true;
 
@@ -902,9 +317,11 @@
 
       if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "Stop failed.");
 
-      createStatusMessage('stop-status-container', '✅ Stop requested successfully. VM will enter STOPPED state shortly.', 'success');
+      statusEl.style.color = "lightgreen";
+      statusEl.textContent = "✅ Stop requested. VM will enter STOPPED state shortly.";
     } catch (e) {
-      createStatusMessage('stop-status-container', `❌ ${e.message || e}`, 'error');
+      statusEl.style.color = "crimson";
+      statusEl.textContent = `❌ ${e.message || e}`;
     } finally {
       spinner.style.display = "none";
       stopBtn.disabled = false;
@@ -919,8 +336,8 @@
     const loadingText = document.getElementById("task-loading");
 
     loadingText.style.display = "block";
-    loadingText.style.color = "var(--text-secondary)";
-    loadingText.innerHTML = "⏳ Fetching local tasks via Agent...";
+    loadingText.style.color = "white";
+    loadingText.innerText = "Fetching local tasks via Agent...";
     taskList.innerHTML = "";
     taskArray = [];
 
@@ -929,7 +346,7 @@
       loadingText.style.display = "none";
 
       if (!data.tasks || data.tasks.length === 0) {
-        taskList.innerHTML = '<option style="text-align: center; color: var(--text-muted);">No running tasks found</option>';
+        taskList.innerHTML = "<option>No running tasks found</option>";
         return;
       }
 
@@ -940,19 +357,16 @@
       });
 
       const hasVSCode = (data.tasks || []).some(t => (t.name || "").toLowerCase() === "code.exe");
-      document.getElementById("migrate-vscode-btn").style.display = hasVSCode ? "inline-flex" : "none";
+      document.getElementById("migrate-vscode-btn").style.display = hasVSCode ? "inline-block" : "none";
 
       populateDropdown();
-      
-      if (taskArray.length > 0) {
-        loadingText.style.display = "block";
-        loadingText.innerHTML = `<span class="badge success">${taskArray.length} tasks</span> ready for migration`;
-      }
+      loadingText.style.display = "block";
+      loadingText.innerText = `${taskArray.length} tasks fetched.`;
     } catch (err) {
       console.error("❌ Error fetching local tasks:", err);
       loadingText.style.display = "block";
-      loadingText.style.color = "var(--error)";
-      loadingText.innerHTML = `❌ <strong>Failed to fetch tasks:</strong> ${err.message || err}`;
+      loadingText.style.color = "crimson";
+      loadingText.innerText = `❌ Failed to fetch tasks: ${err.message || err}`;
     }
   }
 
@@ -963,8 +377,6 @@
     if (taskArray.length === 0) {
       const opt = document.createElement("option");
       opt.text = "No tasks available";
-      opt.style.textAlign = "center";
-      opt.style.color = "var(--text-muted)";
       taskList.add(opt);
       return;
     }
@@ -983,11 +395,14 @@
   async function migrateSelectedTasks() {
     const migrateBtn = document.getElementById("migrate-btn");
     const spinner = document.getElementById("migration-spinner");
+    const statusEl = document.getElementById("migration-status");
     const taskSelect = document.getElementById("tasks");
 
     try {
       spinner.style.display = "inline-block";
       migrateBtn.disabled = true;
+      statusEl.style.color = "white";
+      statusEl.textContent = "";
 
       const agentOk = await isAgentOnline();
       if (!agentOk) throw new Error("Local Agent not running.");
@@ -999,7 +414,7 @@
 
       const selectedOptions = Array.from(taskSelect.selectedOptions);
       if (selectedOptions.length === 0) {
-        createStatusMessage('migration-status-container', '⚠️ Please select at least one task to migrate.', 'warning');
+        statusEl.textContent = "⚠️ Select at least one task.";
         return;
       }
 
@@ -1008,6 +423,7 @@
       const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
 
+      // ✅ FIX: include user_id (FastAPI model requires it)
       const user_id = await getUserId();
 
       const result = await fetchJson(`${AGENT_BASE}/migrate_tasks`, {
@@ -1019,13 +435,12 @@
       const okCount = (result.results || []).filter(r => r.success).length;
       const total = (result.results || []).length;
 
-      createStatusMessage('migration-status-container', 
-        `✅ Migration completed: <strong>${okCount}/${total}</strong> tasks succeeded.`, 
-        okCount === total ? 'success' : 'warning'
-      );
+      statusEl.style.color = "lightgreen";
+      statusEl.textContent = `✅ Migration completed: ${okCount}/${total} succeeded.`;
     } catch (err) {
       console.error(err);
-      createStatusMessage('migration-status-container', `❌ ${err.message || err}`, 'error');
+      statusEl.style.color = "crimson";
+      statusEl.textContent = `❌ ${err.message || err}`;
     } finally {
       spinner.style.display = "none";
       migrateBtn.disabled = false;
@@ -1035,10 +450,13 @@
   async function migrateVSCodeProject() {
     const btn = document.getElementById("migrate-vscode-btn");
     const spinner = document.getElementById("vscode-spinner");
+    const statusEl = document.getElementById("vscode-status");
 
     try {
       spinner.style.display = "inline-block";
       btn.disabled = true;
+      statusEl.style.color = "white";
+      statusEl.textContent = "";
 
       const agentOk = await isAgentOnline();
       if (!agentOk) throw new Error("Local Agent not running.");
@@ -1059,12 +477,11 @@
         body: JSON.stringify({ access_token, vm_ip: vmIp, user_id })
       });
 
-      createStatusMessage('vscode-status-container', 
-        `✅ VSCode migrated successfully. Opened on VM: <code>${data.opened_path || "unknown"}</code>`, 
-        'success'
-      );
+      statusEl.style.color = "lightgreen";
+      statusEl.textContent = `✅ VSCode migrated. Opened on VM: ${data.opened_path || "unknown"}`;
     } catch (e) {
-      createStatusMessage('vscode-status-container', `❌ ${e.message || e}`, 'error');
+      statusEl.style.color = "crimson";
+      statusEl.textContent = `❌ ${e.message || e}`;
     } finally {
       spinner.style.display = "none";
       btn.disabled = false;
@@ -1074,10 +491,13 @@
   async function saveProjectToLocal() {
     const btn = document.getElementById("save-local-btn");
     const spinner = document.getElementById("save-local-spinner");
+    const statusEl = document.getElementById("save-local-status");
 
     try {
       spinner.style.display = "inline-block";
       btn.disabled = true;
+      statusEl.style.color = "white";
+      statusEl.textContent = "";
 
       const agentOk = await isAgentOnline();
       if (!agentOk) throw new Error("Local Agent not running.");
@@ -1092,6 +512,7 @@
       const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
 
+      // ✅ FIX: include user_id (FastAPI model requires it)
       const user_id = await getUserId();
 
       const resp = await fetchJson(`${AGENT_BASE}/save_project_to_local`, {
@@ -1100,12 +521,11 @@
         body: JSON.stringify({ access_token, user_id, vm_ip: vmIp, project_name })
       });
 
-      createStatusMessage('save-local-status-container', 
-        `✅ ${resp.message || "Project saved successfully to your local machine."}`, 
-        'success'
-      );
+      statusEl.style.color = "lightgreen";
+      statusEl.textContent = `✅ ${resp.message || "Saved successfully."}`;
     } catch (e) {
-      createStatusMessage('save-local-status-container', `❌ ${e.message || e}`, 'error');
+      statusEl.style.color = "crimson";
+      statusEl.textContent = `❌ ${e.message || e}`;
     } finally {
       spinner.style.display = "none";
       btn.disabled = false;
@@ -1120,18 +540,18 @@
     const link = document.getElementById("vnc-link");
 
     if (!vmIp) {
-      loading.style.color = "var(--error)";
-      loading.innerHTML = "❌ No VM IP found.";
+      loading.style.color = "crimson";
+      loading.innerText = "❌ No VM IP found.";
       return;
     }
 
     const vncUrl = `http://${vmIp}:8080/vnc.html?autoconnect=true&resize=scale`;
 
-    loading.style.color = "var(--success)";
-    loading.innerHTML = '<span class="badge success">✅ VNC READY</span> Connection available (opens in new tab)';
+    loading.style.color = "lightgreen";
+    loading.innerText = "✅ VNC available (opens in new tab).";
 
     link.href = vncUrl;
-    link.style.display = "inline-flex";
+    link.style.display = "inline-block";
   }
 </script>
 
