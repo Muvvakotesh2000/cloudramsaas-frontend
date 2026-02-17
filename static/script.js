@@ -1,12 +1,14 @@
-// frontend/static/script.js (FULL FILE — corrected)
+// frontend/static/script.js (FULL FILE — corrected + hardened for remote machines)
 // ✅ No auto-redirect to dashboard just because Agent is running
-// ✅ Allocate button enables reliably when Agent is running
+// ✅ Allocate button enables reliably when Agent is running (with polling)
 // ✅ Allocate click flow:
-//    - checks existing VM (timeout + retry)
+//    - checks existing VM (longer timeout for Render cold start)
 //    - if RUNNING -> go dashboard
 //    - if STOPPED -> show Resume / Create New buttons
 //    - if no VM -> allocate new VM
 // ✅ Install & Run button copy works reliably (clipboard + fallback)
+// ✅ AbortError/Signal aborted -> friendly "Timed out" message instead of silent fail
+// ✅ Avoid "double short timeouts" that cause guaranteed failures on cold start networks
 
 console.log("✅ script.js loaded");
 
@@ -32,7 +34,11 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function fetchWithTimeout(url, opts = {}, timeoutMs = 12000) {
+function isAbortError(e) {
+  return e?.name === "AbortError" || String(e).toLowerCase().includes("aborted");
+}
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 25000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -46,7 +52,11 @@ async function fetchJson(url, opts = {}) {
   const r = await fetch(url, opts);
   const text = await r.text();
   let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
 
   if (!r.ok) {
     const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
@@ -55,20 +65,34 @@ async function fetchJson(url, opts = {}) {
   return data;
 }
 
-async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 12000) {
-  const r = await fetchWithTimeout(url, opts, timeoutMs);
-  const text = await r.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 25000) {
+  try {
+    const r = await fetchWithTimeout(url, opts, timeoutMs);
+    const text = await r.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
 
-  if (!r.ok) {
-    const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    if (!r.ok) {
+      const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    return data;
+  } catch (e) {
+    if (isAbortError(e)) {
+      throw new Error(
+        `Request timed out after ${Math.round(timeoutMs / 1000)}s. Try again (cold start / slow network).`
+      );
+    }
+    throw e;
   }
-  return data;
 }
 
 async function isAgentOnline() {
+  // fast health check
   try {
     const r = await fetchWithTimeout(`${agentBase()}/health`, { cache: "no-store" }, 2500);
     return r.ok;
@@ -148,6 +172,7 @@ function setAllocateBusy(isBusy, msg = "") {
 // ✅ On /allocate page load or Retry click: enable Allocate if Agent online
 async function updateAllocateGate() {
   const ok = await isAgentOnline();
+
   if (ok) {
     setGateStatus(true, "✅ Local Agent is running. Click Allocate to check existing VM / create one.");
   } else {
@@ -157,6 +182,29 @@ async function updateAllocateGate() {
   // ensure Allocate button is visible (in case stopped-vm UI hid it previously)
   const allocateBtn = document.getElementById("allocate-btn");
   if (allocateBtn) allocateBtn.style.display = "inline-block";
+}
+
+// ✅ Poll agent for a short period (helps on refresh/slow startup)
+let _agentPollTimer = null;
+function startAgentGatePolling() {
+  if (_agentPollTimer) return;
+  _agentPollTimer = setInterval(async () => {
+    // only poll while on allocate page
+    if (window.location.pathname.toLowerCase() !== "/allocate") return;
+
+    const ok = await isAgentOnline();
+    const allocateBtn = document.getElementById("allocate-btn");
+
+    if (ok) {
+      // Only flip to enabled if not busy
+      if (allocateBtn && allocateBtn.disabled && document.getElementById("loading-text")?.style.display !== "block") {
+        setGateStatus(true, "✅ Local Agent is running. Click Allocate to check existing VM / create one.");
+      }
+      // Once online, stop polling to reduce noise
+      clearInterval(_agentPollTimer);
+      _agentPollTimer = null;
+    }
+  }, 1200);
 }
 
 // ==================================================
@@ -178,7 +226,7 @@ function buildInstallCommand() {
     'python -m venv .venv',
     'Write-Host "Installing requirements..."',
     '.\\.venv\\Scripts\\pip.exe install -r requirements.txt',
-    'Write-Host "✅ Install complete. Next: run the agent."'
+    'Write-Host "✅ Install complete. Next: run the agent."',
   ].join(" ; ");
 }
 
@@ -189,7 +237,7 @@ function buildRunCommand() {
     '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
     'if (-not $root) { throw "Agent folder not found. Run install first." }',
     'Set-Location $root.FullName',
-    '.\\.venv\\Scripts\\python.exe agent_main.py'
+    '.\\.venv\\Scripts\\python.exe agent_main.py',
   ].join(" ; ");
 }
 
@@ -212,7 +260,7 @@ function navigate(page, pushState = true) {
   if (target) target.style.display = "block";
 
   const nav = document.getElementById("nav");
-  if (nav) nav.style.display = (page === "login" || page === "register") ? "none" : "block";
+  if (nav) nav.style.display = page === "login" || page === "register" ? "none" : "block";
 
   if (pushState) {
     const newPath =
@@ -224,14 +272,16 @@ function navigate(page, pushState = true) {
     window.history.pushState({}, "", newPath);
   }
 
-  // IMPORTANT: do not auto-check existing VM here (user wants it on Allocate click)
   if (page === "allocate") {
     setTimeout(async () => {
       await updateAllocateGate();
+      startAgentGatePolling();
+
       const statusMessage = document.getElementById("status-message");
       if (statusMessage) {
         statusMessage.style.color = "white";
-        statusMessage.textContent = "Click Allocate to check existing VM (running/stopped) or create a new VM.";
+        statusMessage.textContent =
+          "Click Allocate to check existing VM (running/stopped) or create a new VM.";
       }
     }, 0);
   }
@@ -264,7 +314,7 @@ async function getSb() {
   return window._sbClient;
 }
 
-// ✅ DO NOT force user to Home on refresh
+// ✅ Do not force home on refresh; stay on current route
 async function refreshUIForSession() {
   const sb = await getSb();
   if (!sb) return;
@@ -280,7 +330,6 @@ async function refreshUIForSession() {
 
   localStorage.setItem("sb_access_token", session.access_token);
 
-  // Stay on current route
   const path = window.location.pathname.toLowerCase();
   if (path === "/allocate") navigate("allocate", false);
   else if (path === "/") navigate("home", false);
@@ -355,11 +404,9 @@ async function login() {
       localStorage.setItem("sb_access_token", data.session.access_token);
     }
 
-    // after login, go home (unless user explicitly browsed to /allocate)
     const path = window.location.pathname.toLowerCase();
     if (path === "/allocate") navigate("allocate");
     else navigate("home");
-
   } catch (e) {
     console.error("Unexpected login exception:", e);
     if (errorEl) errorEl.textContent = "Unexpected login error. Check console.";
@@ -407,7 +454,6 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
   const allocateBtn = document.getElementById("allocate-btn");
   if (!statusMessage) return;
 
-  // hide allocate button while choices are shown
   if (allocateBtn) allocateBtn.style.display = "none";
 
   statusMessage.style.color = "white";
@@ -445,12 +491,11 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
             "Authorization": `Bearer ${accessToken}`,
           },
           body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-        }, 20000);
+        }, 60000); // resume may take longer
 
         localStorage.setItem("vm_id", data.vm_id);
         if (data.ip) localStorage.setItem("vm_ip", data.ip);
 
-        // After resume, go dashboard
         window.location.href = "/status";
       } catch (e) {
         const sm = document.getElementById("status-message");
@@ -460,6 +505,7 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
         }
       } finally {
         setAllocateBusy(false);
+        await updateAllocateGate();
       }
     });
   }
@@ -482,12 +528,10 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
             "Authorization": `Bearer ${accessToken}`,
           },
           body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-        }, 20000);
+        }, 60000);
 
-        // show allocate button again
         if (allocateBtn) {
           allocateBtn.style.display = "inline-block";
-          allocateBtn.disabled = !(await isAgentOnline());
         }
 
         statusMessage.style.color = "white";
@@ -497,26 +541,22 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
         statusMessage.textContent = `❌ Could not terminate old VM: ${e.message || e}`;
       } finally {
         setAllocateBusy(false);
+        await updateAllocateGate();
       }
     });
   }
 }
 
 // ==================================================
-// ✅ Allocate Click Flow (THIS is the only place we check existing VM)
+// ✅ Allocate Click Flow (ONLY place we check existing VM)
 // ==================================================
-async function getMyVmInfoWithRetry(accessToken) {
+async function getMyVmInfo(accessToken) {
   const base = await apiBase();
   const url = `${base}/my_vm`;
   const opts = { headers: { "Authorization": `Bearer ${accessToken}` } };
 
-  // Try 1
-  try {
-    return await fetchJsonWithTimeout(url, opts, 12000);
-  } catch (e1) {
-    // Retry once
-    return await fetchJsonWithTimeout(url, opts, 12000);
-  }
+  // Longer timeout for Render cold start / slow networks
+  return await fetchJsonWithTimeout(url, opts, 25000);
 }
 
 async function allocateClickFlow() {
@@ -539,6 +579,7 @@ async function allocateClickFlow() {
         statusMessage.style.color = "crimson";
         statusMessage.textContent = "Start Local Agent first. Allocate is disabled until Agent is running.";
       }
+      startAgentGatePolling();
       return;
     }
 
@@ -554,9 +595,8 @@ async function allocateClickFlow() {
     // Step 1: check existing VM (running/stopped)
     setAllocateBusy(true, "Checking existing VM...");
 
-    const info = await getMyVmInfoWithRetry(accessToken);
+    const info = await getMyVmInfo(accessToken);
 
-    // keep vm_id/ip in localStorage if present
     if (info?.vm_id) localStorage.setItem("vm_id", info.vm_id);
     if (info?.ip) localStorage.setItem("vm_ip", info.ip);
 
@@ -577,7 +617,6 @@ async function allocateClickFlow() {
         return;
       }
 
-      // pending/starting etc: show message, do not allocate a new one
       if (statusMessage) {
         statusMessage.style.color = "white";
         statusMessage.textContent = `⏳ Existing VM found in state: ${info.state}. Please wait and try again in a moment.`;
@@ -596,16 +635,14 @@ async function allocateClickFlow() {
         "Authorization": `Bearer ${accessToken}`,
       },
       body: JSON.stringify({ ram_size: ramSize }),
-    }, 30000);
+    }, 90000); // allocate request can be slow on cold start
 
-    // backend might respond action_required for stopped VM scenario
     if (data?.action_required) {
       setAllocateBusy(false);
       renderStoppedVmChoices({ vm_id: data.vm_id, state: data.state, ip: data.ip }, accessToken);
       return;
     }
 
-    // Success allocate
     if (data?.vm_id) localStorage.setItem("vm_id", data.vm_id);
     if (data?.ip) localStorage.setItem("vm_ip", data.ip);
 
@@ -623,7 +660,6 @@ async function allocateClickFlow() {
     if (allocateBtn) allocateBtn.style.display = "inline-block";
   } finally {
     setAllocateBusy(false);
-    // Re-evaluate gate (sometimes button stays disabled after errors)
     await updateAllocateGate();
   }
 }
@@ -632,24 +668,24 @@ async function allocateClickFlow() {
 // ✅ INIT
 // ==================================================
 document.addEventListener("DOMContentLoaded", async () => {
-  // initial route
   routeByPath();
 
   const sb = await getSb();
   if (!sb) return;
 
-  // keep route, don’t auto-bounce to home on refresh
   await refreshUIForSession();
 
-  // if user is on allocate after refresh, make sure gate is correct
+  // If user is on allocate after refresh, gate should be correct + poll for agent readiness
   if (window.location.pathname.toLowerCase() === "/allocate") {
     await updateAllocateGate();
+    startAgentGatePolling();
   }
 
   sb.auth.onAuthStateChange(async () => {
     await refreshUIForSession();
     if (window.location.pathname.toLowerCase() === "/allocate") {
       await updateAllocateGate();
+      startAgentGatePolling();
     }
   });
 
@@ -657,9 +693,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   const allocateBtn = document.getElementById("allocate-btn");
   if (allocateBtn) allocateBtn.addEventListener("click", allocateClickFlow);
 
-  // Retry agent button: ONLY updates gate; does NOT auto-redirect
+  // Retry agent button: updates gate, no redirect
   const retry = document.getElementById("allocate-agent-retry");
-  if (retry) retry.addEventListener("click", updateAllocateGate);
+  if (retry) {
+    retry.addEventListener("click", async () => {
+      await updateAllocateGate();
+      startAgentGatePolling();
+    });
+  }
 
   // Install & Run: reliable copy
   const installRun = document.getElementById("allocate-install-run");
@@ -668,7 +709,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       const cmd = buildInstallAndRunCommand();
       const res = await copyTextReliable(cmd);
 
-      setGateStatus(false,
+      setGateStatus(
+        false,
         res.ok
           ? `📋 Install & Run command copied (${res.method}). Paste into PowerShell, then click Retry Agent.`
           : "❌ Could not copy automatically. Open console for the command."
