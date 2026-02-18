@@ -1,16 +1,6 @@
-// frontend/static/script.js (FULL FILE — resume/allocate hardened with polling)
-// ✅ No auto-redirect to dashboard just because Agent is running
-// ✅ Allocate button enables reliably when Agent is running (with polling)
-// ✅ Allocate click flow:
-//    - checks existing VM
-//    - if RUNNING -> go dashboard
-//    - if STOPPED -> show Resume / Create New buttons
-//    - if no VM -> allocate new VM
-// ✅ Resume flow:
-//    - POST /start_vm with short timeout (non-fatal if timeout)
-//    - poll /my_vm until RUNNING + IP (up to 15 min)
-// ✅ Allocate flow after /allocate:
-//    - poll /my_vm until RUNNING + IP (up to 15 min)
+// frontend/static/script.js (FULL FILE — corrected again: my_vm polling is timeout-tolerant)
+// ✅ Resume/Allocate will NOT fail on a single my_vm timeout
+// ✅ my_vm polling uses longer per-request timeout + keeps retrying until overall max time
 
 console.log("✅ script.js loaded");
 
@@ -40,7 +30,11 @@ function isAbortError(e) {
   return e?.name === "AbortError" || String(e).toLowerCase().includes("aborted");
 }
 
-async function fetchWithTimeout(url, opts = {}, timeoutMs = 25000) {
+function isTimeoutMessage(e) {
+  return String(e?.message || e || "").toLowerCase().includes("timed out");
+}
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 30000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -50,10 +44,11 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 25000) {
   }
 }
 
-async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 25000) {
+async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 30000) {
   try {
     const r = await fetchWithTimeout(url, opts, timeoutMs);
     const text = await r.text();
+
     let data;
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
@@ -241,6 +236,7 @@ function navigate(page, pushState = true) {
     setTimeout(async () => {
       await updateAllocateGate();
       startAgentGatePolling();
+
       const statusMessage = document.getElementById("status-message");
       if (statusMessage) {
         statusMessage.style.color = "white";
@@ -397,40 +393,58 @@ window.loginWithGoogle = loginWithGoogle;
 window.logout = logout;
 
 // ==================================================
-// ✅ VM polling (used by Resume + Allocate)
+// ✅ VM polling (timeout-tolerant)
 // ==================================================
-async function pollVmUntilRunning(accessToken, { maxMinutes = 15, intervalMs = 5000, statusPrefix = "⏳" } = {}) {
+async function pollVmUntilRunning(accessToken, {
+  maxMinutes = 15,
+  intervalMs = 5000,
+  requestTimeoutMs = 90000, // ✅ per-request timeout
+  statusPrefix = "⏳"
+} = {}) {
   const base = await apiBase();
   const url = `${base}/my_vm`;
   const headers = { "Authorization": `Bearer ${accessToken}` };
 
-  const maxTries = Math.ceil((maxMinutes * 60 * 1000) / intervalMs);
+  const endAt = Date.now() + maxMinutes * 60 * 1000;
+  let attempt = 0;
 
-  for (let i = 1; i <= maxTries; i++) {
-    const info = await fetchJsonWithTimeout(url, { headers }, 25000);
+  while (Date.now() < endAt) {
+    attempt += 1;
 
-    // update localStorage
+    let info = null;
+    try {
+      info = await fetchJsonWithTimeout(url, { headers }, requestTimeoutMs);
+    } catch (e) {
+      // ✅ IMPORTANT: tolerate timeouts during polling
+      if (isTimeoutMessage(e)) {
+        const sm = document.getElementById("status-message");
+        if (sm) {
+          sm.style.color = "white";
+          sm.textContent = `${statusPrefix} Network slow / backend cold start. Retrying... (attempt ${attempt})`;
+        }
+        await sleep(intervalMs);
+        continue;
+      }
+      throw e; // real error (401, 500, etc.)
+    }
+
     if (info?.vm_id) localStorage.setItem("vm_id", info.vm_id);
     if (info?.ip) localStorage.setItem("vm_ip", info.ip);
 
     const sm = document.getElementById("status-message");
     if (sm) {
       sm.style.color = "white";
-      sm.textContent = `${statusPrefix} Waiting for VM... state=${info.state || "unknown"} (${i}/${maxTries})`;
+      sm.textContent = `${statusPrefix} Waiting... state=${info.state || "unknown"} (attempt ${attempt})`;
     }
 
-    if (!info.exists) {
-      throw new Error("No VM found while waiting. Please try Allocate again.");
-    }
+    if (!info.exists) throw new Error("No VM found while waiting. Please click Allocate again.");
 
-    if (info.state === "running" && info.ip) {
-      return info;
-    }
+    if (info.state === "running" && info.ip) return info;
 
     await sleep(intervalMs);
   }
 
-  throw new Error("VM is taking longer than expected. Please wait a bit more and click Allocate again.");
+  throw new Error("VM is taking longer than expected. Please wait and try again.");
 }
 
 // ==================================================
@@ -468,11 +482,11 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
   if (resumeBtn) {
     resumeBtn.addEventListener("click", async () => {
       try {
-        setAllocateBusy(true, "Starting resume request (can take several minutes)...");
+        setAllocateBusy(true, "Requesting resume (this can take several minutes)...");
 
         const base = await apiBase();
 
-        // ✅ Non-fatal timeout: if it times out, we continue to polling
+        // Short timeout request, not fatal if it times out
         try {
           await fetchJsonWithTimeout(`${base}/start_vm`, {
             method: "POST",
@@ -481,9 +495,10 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
               "Authorization": `Bearer ${accessToken}`,
             },
             body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-          }, 20000); // short request timeout
+          }, 25000);
         } catch (e) {
-          // If it timed out, that's okay — AWS can still be starting
+          if (!isTimeoutMessage(e)) throw e;
+          // If timed out, still proceed to poll
           const sm = document.getElementById("status-message");
           if (sm) {
             sm.style.color = "white";
@@ -491,10 +506,14 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
           }
         }
 
-        // ✅ Poll /my_vm up to 15 minutes
-        await pollVmUntilRunning(accessToken, { maxMinutes: 15, intervalMs: 5000, statusPrefix: "⏳ Resuming:" });
+        // Poll until running + IP
+        await pollVmUntilRunning(accessToken, {
+          maxMinutes: 15,
+          intervalMs: 5000,
+          requestTimeoutMs: 90000,
+          statusPrefix: "⏳ Resuming:"
+        });
 
-        // ✅ When ready -> dashboard
         window.location.href = "/status";
       } catch (e) {
         const sm = document.getElementById("status-message");
@@ -520,7 +539,6 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
         setAllocateBusy(true, "Terminating old VM...");
 
         const base = await apiBase();
-        // terminate can also be slow
         await fetchJsonWithTimeout(`${base}/terminate_vm`, {
           method: "POST",
           headers: {
@@ -528,7 +546,7 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
             "Authorization": `Bearer ${accessToken}`,
           },
           body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-        }, 60000);
+        }, 90000);
 
         if (allocateBtn) allocateBtn.style.display = "inline-block";
 
@@ -552,7 +570,7 @@ async function getMyVmInfo(accessToken) {
   const base = await apiBase();
   return await fetchJsonWithTimeout(`${base}/my_vm`, {
     headers: { "Authorization": `Bearer ${accessToken}` }
-  }, 25000);
+  }, 90000); // ✅ longer for slow/cold networks
 }
 
 async function allocateClickFlow() {
@@ -566,7 +584,6 @@ async function allocateClickFlow() {
       statusMessage.textContent = "";
     }
 
-    // Gate: agent must be running
     const agentOk = await isAgentOnline();
     if (!agentOk) {
       setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
@@ -612,18 +629,16 @@ async function allocateClickFlow() {
 
       if (statusMessage) {
         statusMessage.style.color = "white";
-        statusMessage.textContent = `⏳ Existing VM found in state: ${info.state}. Please wait and try again in a moment.`;
+        statusMessage.textContent = `⏳ Existing VM found in state: ${info.state}. Please wait and try again.`;
       }
       return;
     }
 
-    // No VM -> allocate
     setAllocateBusy(true, "Allocating new VM (can take 10–15 minutes)...");
 
     const base = await apiBase();
 
-    // ✅ Non-fatal timeout: allocate request might take long.
-    // If it times out, we still poll /my_vm.
+    // Non-fatal timeout, then poll /my_vm
     try {
       await fetchJsonWithTimeout(`${base}/allocate`, {
         method: "POST",
@@ -634,15 +649,19 @@ async function allocateClickFlow() {
         body: JSON.stringify({ ram_size: ramSize }),
       }, 25000);
     } catch (e) {
-      const sm = document.getElementById("status-message");
-      if (sm) {
-        sm.style.color = "white";
-        sm.textContent = "⏳ Allocation requested. Waiting for VM to become RUNNING and get an IP...";
+      if (!isTimeoutMessage(e)) throw e;
+      if (statusMessage) {
+        statusMessage.style.color = "white";
+        statusMessage.textContent = "⏳ Allocation requested. Waiting for VM to become RUNNING and get an IP...";
       }
     }
 
-    // ✅ Poll /my_vm for readiness (up to 15 minutes)
-    await pollVmUntilRunning(accessToken, { maxMinutes: 15, intervalMs: 5000, statusPrefix: "⏳ Allocating:" });
+    await pollVmUntilRunning(accessToken, {
+      maxMinutes: 15,
+      intervalMs: 5000,
+      requestTimeoutMs: 90000,
+      statusPrefix: "⏳ Allocating:"
+    });
 
     if (statusMessage) {
       statusMessage.style.color = "lightgreen";
