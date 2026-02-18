@@ -1,14 +1,16 @@
-// frontend/static/script.js (FULL FILE — corrected + hardened for remote machines)
+// frontend/static/script.js (FULL FILE — resume/allocate hardened with polling)
 // ✅ No auto-redirect to dashboard just because Agent is running
 // ✅ Allocate button enables reliably when Agent is running (with polling)
 // ✅ Allocate click flow:
-//    - checks existing VM (longer timeout for Render cold start)
+//    - checks existing VM
 //    - if RUNNING -> go dashboard
 //    - if STOPPED -> show Resume / Create New buttons
 //    - if no VM -> allocate new VM
-// ✅ Install & Run button copy works reliably (clipboard + fallback)
-// ✅ AbortError/Signal aborted -> friendly "Timed out" message instead of silent fail
-// ✅ Avoid "double short timeouts" that cause guaranteed failures on cold start networks
+// ✅ Resume flow:
+//    - POST /start_vm with short timeout (non-fatal if timeout)
+//    - poll /my_vm until RUNNING + IP (up to 15 min)
+// ✅ Allocate flow after /allocate:
+//    - poll /my_vm until RUNNING + IP (up to 15 min)
 
 console.log("✅ script.js loaded");
 
@@ -48,33 +50,12 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 25000) {
   }
 }
 
-async function fetchJson(url, opts = {}) {
-  const r = await fetch(url, opts);
-  const text = await r.text();
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    data = { raw: text };
-  }
-
-  if (!r.ok) {
-    const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
-  }
-  return data;
-}
-
 async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 25000) {
   try {
     const r = await fetchWithTimeout(url, opts, timeoutMs);
     const text = await r.text();
     let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { raw: text };
-    }
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
     if (!r.ok) {
       const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
@@ -83,16 +64,13 @@ async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 25000) {
     return data;
   } catch (e) {
     if (isAbortError(e)) {
-      throw new Error(
-        `Request timed out after ${Math.round(timeoutMs / 1000)}s. Try again (cold start / slow network).`
-      );
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
     }
     throw e;
   }
 }
 
 async function isAgentOnline() {
-  // fast health check
   try {
     const r = await fetchWithTimeout(`${agentBase()}/health`, { cache: "no-store" }, 2500);
     return r.ok;
@@ -103,7 +81,6 @@ async function isAgentOnline() {
 
 // Clipboard copy that always gives user a way to copy
 async function copyTextReliable(text) {
-  // 1) modern clipboard
   try {
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(text);
@@ -111,7 +88,6 @@ async function copyTextReliable(text) {
     }
   } catch {}
 
-  // 2) fallback textarea copy
   try {
     const ta = document.createElement("textarea");
     ta.value = text;
@@ -128,7 +104,6 @@ async function copyTextReliable(text) {
     if (ok) return { ok: true, method: "execCommand" };
   } catch {}
 
-  // 3) last resort prompt
   try {
     window.prompt("Copy this command:", text);
     return { ok: true, method: "prompt" };
@@ -169,17 +144,11 @@ function setAllocateBusy(isBusy, msg = "") {
   }
 }
 
-// ✅ On /allocate page load or Retry click: enable Allocate if Agent online
 async function updateAllocateGate() {
   const ok = await isAgentOnline();
+  if (ok) setGateStatus(true, "✅ Local Agent is running. Click Allocate to continue.");
+  else setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
 
-  if (ok) {
-    setGateStatus(true, "✅ Local Agent is running. Click Allocate to check existing VM / create one.");
-  } else {
-    setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
-  }
-
-  // ensure Allocate button is visible (in case stopped-vm UI hid it previously)
   const allocateBtn = document.getElementById("allocate-btn");
   if (allocateBtn) allocateBtn.style.display = "inline-block";
 }
@@ -189,18 +158,15 @@ let _agentPollTimer = null;
 function startAgentGatePolling() {
   if (_agentPollTimer) return;
   _agentPollTimer = setInterval(async () => {
-    // only poll while on allocate page
     if (window.location.pathname.toLowerCase() !== "/allocate") return;
 
     const ok = await isAgentOnline();
     const allocateBtn = document.getElementById("allocate-btn");
 
     if (ok) {
-      // Only flip to enabled if not busy
       if (allocateBtn && allocateBtn.disabled && document.getElementById("loading-text")?.style.display !== "block") {
-        setGateStatus(true, "✅ Local Agent is running. Click Allocate to check existing VM / create one.");
+        setGateStatus(true, "✅ Local Agent is running. Click Allocate to continue.");
       }
-      // Once online, stop polling to reduce noise
       clearInterval(_agentPollTimer);
       _agentPollTimer = null;
     }
@@ -260,7 +226,7 @@ function navigate(page, pushState = true) {
   if (target) target.style.display = "block";
 
   const nav = document.getElementById("nav");
-  if (nav) nav.style.display = page === "login" || page === "register" ? "none" : "block";
+  if (nav) nav.style.display = (page === "login" || page === "register") ? "none" : "block";
 
   if (pushState) {
     const newPath =
@@ -268,7 +234,6 @@ function navigate(page, pushState = true) {
       page === "register" ? "/register" :
       page === "home" ? "/" :
       page === "allocate" ? "/allocate" : "/";
-
     window.history.pushState({}, "", newPath);
   }
 
@@ -276,7 +241,6 @@ function navigate(page, pushState = true) {
     setTimeout(async () => {
       await updateAllocateGate();
       startAgentGatePolling();
-
       const statusMessage = document.getElementById("status-message");
       if (statusMessage) {
         statusMessage.style.color = "white";
@@ -304,23 +268,19 @@ window.navigate = navigate;
 async function getSb() {
   if (window._sbClient) return window._sbClient;
   const cfg = await window.loadAppConfig();
-
   if (!window.supabase || !window.supabase.createClient) {
     console.error("❌ Supabase SDK not loaded. Check index.html script order.");
     return null;
   }
-
   window._sbClient = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
   return window._sbClient;
 }
 
-// ✅ Do not force home on refresh; stay on current route
 async function refreshUIForSession() {
   const sb = await getSb();
   if (!sb) return;
 
   const { data: { session } } = await sb.auth.getSession();
-
   if (!session) {
     localStorage.removeItem("sb_access_token");
     const p = window.location.pathname.toLowerCase();
@@ -348,7 +308,6 @@ async function registerUser() {
   const sb = await getSb();
   const errorEl = document.getElementById("register-error");
   if (errorEl) errorEl.textContent = "";
-
   if (!sb) {
     if (errorEl) errorEl.textContent = "Supabase not initialized.";
     return;
@@ -382,7 +341,6 @@ async function login() {
   const sb = await getSb();
   const errorEl = document.getElementById("login-error");
   if (errorEl) errorEl.textContent = "";
-
   if (!sb) {
     if (errorEl) errorEl.textContent = "Supabase not initialized.";
     return;
@@ -393,22 +351,16 @@ async function login() {
 
   try {
     const { data, error } = await sb.auth.signInWithPassword({ email, password });
-
     if (error) {
-      console.error("Supabase login error:", error);
-      if (errorEl) errorEl.textContent = `${error.message}`;
+      if (errorEl) errorEl.textContent = error.message;
       return;
     }
-
-    if (data?.session?.access_token) {
-      localStorage.setItem("sb_access_token", data.session.access_token);
-    }
+    if (data?.session?.access_token) localStorage.setItem("sb_access_token", data.session.access_token);
 
     const path = window.location.pathname.toLowerCase();
     if (path === "/allocate") navigate("allocate");
     else navigate("home");
   } catch (e) {
-    console.error("Unexpected login exception:", e);
     if (errorEl) errorEl.textContent = "Unexpected login error. Check console.";
   }
 }
@@ -417,7 +369,6 @@ async function loginWithGoogle() {
   const sb = await getSb();
   const errorEl = document.getElementById("login-error");
   if (errorEl) errorEl.textContent = "";
-
   if (!sb) {
     if (errorEl) errorEl.textContent = "Supabase not initialized.";
     return;
@@ -434,7 +385,6 @@ async function loginWithGoogle() {
 async function logout() {
   const sb = await getSb();
   if (sb) await sb.auth.signOut();
-
   localStorage.removeItem("sb_access_token");
   localStorage.removeItem("vm_id");
   localStorage.removeItem("vm_ip");
@@ -445,6 +395,43 @@ window.registerUser = registerUser;
 window.login = login;
 window.loginWithGoogle = loginWithGoogle;
 window.logout = logout;
+
+// ==================================================
+// ✅ VM polling (used by Resume + Allocate)
+// ==================================================
+async function pollVmUntilRunning(accessToken, { maxMinutes = 15, intervalMs = 5000, statusPrefix = "⏳" } = {}) {
+  const base = await apiBase();
+  const url = `${base}/my_vm`;
+  const headers = { "Authorization": `Bearer ${accessToken}` };
+
+  const maxTries = Math.ceil((maxMinutes * 60 * 1000) / intervalMs);
+
+  for (let i = 1; i <= maxTries; i++) {
+    const info = await fetchJsonWithTimeout(url, { headers }, 25000);
+
+    // update localStorage
+    if (info?.vm_id) localStorage.setItem("vm_id", info.vm_id);
+    if (info?.ip) localStorage.setItem("vm_ip", info.ip);
+
+    const sm = document.getElementById("status-message");
+    if (sm) {
+      sm.style.color = "white";
+      sm.textContent = `${statusPrefix} Waiting for VM... state=${info.state || "unknown"} (${i}/${maxTries})`;
+    }
+
+    if (!info.exists) {
+      throw new Error("No VM found while waiting. Please try Allocate again.");
+    }
+
+    if (info.state === "running" && info.ip) {
+      return info;
+    }
+
+    await sleep(intervalMs);
+  }
+
+  throw new Error("VM is taking longer than expected. Please wait a bit more and click Allocate again.");
+}
 
 // ==================================================
 // ✅ Existing VM UI (stopped)
@@ -481,21 +468,33 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
   if (resumeBtn) {
     resumeBtn.addEventListener("click", async () => {
       try {
-        setAllocateBusy(true, "Resuming VM...");
+        setAllocateBusy(true, "Starting resume request (can take several minutes)...");
 
         const base = await apiBase();
-        const data = await fetchJsonWithTimeout(`${base}/start_vm`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${accessToken}`,
-          },
-          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-        }, 60000); // resume may take longer
 
-        localStorage.setItem("vm_id", data.vm_id);
-        if (data.ip) localStorage.setItem("vm_ip", data.ip);
+        // ✅ Non-fatal timeout: if it times out, we continue to polling
+        try {
+          await fetchJsonWithTimeout(`${base}/start_vm`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({ vm_id: vmInfo.vm_id }),
+          }, 20000); // short request timeout
+        } catch (e) {
+          // If it timed out, that's okay — AWS can still be starting
+          const sm = document.getElementById("status-message");
+          if (sm) {
+            sm.style.color = "white";
+            sm.textContent = "⏳ Resume requested. Waiting for VM to become RUNNING and get an IP...";
+          }
+        }
 
+        // ✅ Poll /my_vm up to 15 minutes
+        await pollVmUntilRunning(accessToken, { maxMinutes: 15, intervalMs: 5000, statusPrefix: "⏳ Resuming:" });
+
+        // ✅ When ready -> dashboard
         window.location.href = "/status";
       } catch (e) {
         const sm = document.getElementById("status-message");
@@ -521,6 +520,7 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
         setAllocateBusy(true, "Terminating old VM...");
 
         const base = await apiBase();
+        // terminate can also be slow
         await fetchJsonWithTimeout(`${base}/terminate_vm`, {
           method: "POST",
           headers: {
@@ -530,9 +530,7 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
           body: JSON.stringify({ vm_id: vmInfo.vm_id }),
         }, 60000);
 
-        if (allocateBtn) {
-          allocateBtn.style.display = "inline-block";
-        }
+        if (allocateBtn) allocateBtn.style.display = "inline-block";
 
         statusMessage.style.color = "white";
         statusMessage.textContent = "✅ Old VM terminated. Click Allocate again to create a new instance.";
@@ -548,21 +546,18 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
 }
 
 // ==================================================
-// ✅ Allocate Click Flow (ONLY place we check existing VM)
+// ✅ Allocate Click Flow
 // ==================================================
 async function getMyVmInfo(accessToken) {
   const base = await apiBase();
-  const url = `${base}/my_vm`;
-  const opts = { headers: { "Authorization": `Bearer ${accessToken}` } };
-
-  // Longer timeout for Render cold start / slow networks
-  return await fetchJsonWithTimeout(url, opts, 25000);
+  return await fetchJsonWithTimeout(`${base}/my_vm`, {
+    headers: { "Authorization": `Bearer ${accessToken}` }
+  }, 25000);
 }
 
 async function allocateClickFlow() {
   const sb = await getSb();
   const statusMessage = document.getElementById("status-message");
-  const allocateBtn = document.getElementById("allocate-btn");
   const ramSize = parseInt(document.getElementById("ram")?.value || "1", 10);
 
   try {
@@ -583,7 +578,6 @@ async function allocateClickFlow() {
       return;
     }
 
-    // Gate: logged in
     const { data: { session } } = await sb.auth.getSession();
     if (!session) {
       navigate("login");
@@ -592,7 +586,6 @@ async function allocateClickFlow() {
     const accessToken = session.access_token;
     localStorage.setItem("sb_access_token", accessToken);
 
-    // Step 1: check existing VM (running/stopped)
     setAllocateBusy(true, "Checking existing VM...");
 
     const info = await getMyVmInfo(accessToken);
@@ -624,31 +617,36 @@ async function allocateClickFlow() {
       return;
     }
 
-    // Step 2: no VM exists -> allocate new one
-    setAllocateBusy(true, "No existing VM found. Allocating new VM (can take 10–15 minutes)...");
+    // No VM -> allocate
+    setAllocateBusy(true, "Allocating new VM (can take 10–15 minutes)...");
 
     const base = await apiBase();
-    const data = await fetchJsonWithTimeout(`${base}/allocate`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({ ram_size: ramSize }),
-    }, 90000); // allocate request can be slow on cold start
 
-    if (data?.action_required) {
-      setAllocateBusy(false);
-      renderStoppedVmChoices({ vm_id: data.vm_id, state: data.state, ip: data.ip }, accessToken);
-      return;
+    // ✅ Non-fatal timeout: allocate request might take long.
+    // If it times out, we still poll /my_vm.
+    try {
+      await fetchJsonWithTimeout(`${base}/allocate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ ram_size: ramSize }),
+      }, 25000);
+    } catch (e) {
+      const sm = document.getElementById("status-message");
+      if (sm) {
+        sm.style.color = "white";
+        sm.textContent = "⏳ Allocation requested. Waiting for VM to become RUNNING and get an IP...";
+      }
     }
 
-    if (data?.vm_id) localStorage.setItem("vm_id", data.vm_id);
-    if (data?.ip) localStorage.setItem("vm_ip", data.ip);
+    // ✅ Poll /my_vm for readiness (up to 15 minutes)
+    await pollVmUntilRunning(accessToken, { maxMinutes: 15, intervalMs: 5000, statusPrefix: "⏳ Allocating:" });
 
     if (statusMessage) {
       statusMessage.style.color = "lightgreen";
-      statusMessage.textContent = "✅ VM allocated. Opening dashboard...";
+      statusMessage.textContent = "✅ VM is ready. Opening dashboard...";
     }
     await sleep(350);
     window.location.href = "/status";
@@ -657,7 +655,6 @@ async function allocateClickFlow() {
       statusMessage.style.color = "crimson";
       statusMessage.textContent = `❌ ${err.message || err}`;
     }
-    if (allocateBtn) allocateBtn.style.display = "inline-block";
   } finally {
     setAllocateBusy(false);
     await updateAllocateGate();
@@ -675,7 +672,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await refreshUIForSession();
 
-  // If user is on allocate after refresh, gate should be correct + poll for agent readiness
   if (window.location.pathname.toLowerCase() === "/allocate") {
     await updateAllocateGate();
     startAgentGatePolling();
@@ -689,11 +685,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Allocate click
   const allocateBtn = document.getElementById("allocate-btn");
   if (allocateBtn) allocateBtn.addEventListener("click", allocateClickFlow);
 
-  // Retry agent button: updates gate, no redirect
   const retry = document.getElementById("allocate-agent-retry");
   if (retry) {
     retry.addEventListener("click", async () => {
@@ -702,7 +696,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  // Install & Run: reliable copy
   const installRun = document.getElementById("allocate-install-run");
   if (installRun) {
     installRun.addEventListener("click", async () => {
