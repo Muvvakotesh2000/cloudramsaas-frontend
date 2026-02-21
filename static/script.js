@@ -1,8 +1,7 @@
-// frontend/static/script.js (FULL FILE — UPDATED: Allocate + Resume/New buttons bulletproof)
+// frontend/static/script.js (FULL FILE — UPDATED: delegation works even when click target is TEXT NODE)
 // ✅ Fixes:
-//   - Allocate click sometimes prints but doesn't proceed (timeouts + token fallback + step UI)
-//   - Resume instance / Create new instance buttons not working (dynamic HTML + event delegation)
-//   - Removes double-binding on #allocate-btn
+//   - Resume/New buttons not working because click target can be a Text node (not Element)
+//   - Keeps single-source-of-truth event delegation for Allocate + Resume/New
 
 console.log("✅ script.js loaded");
 
@@ -513,7 +512,7 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
     </div>
   `;
 
-  // store current vm info for delegation handlers
+  // store context for delegated handlers
   window.__stoppedVmInfo = { vm_id: vmInfo.vm_id, accessToken };
 }
 
@@ -597,14 +596,7 @@ async function allocateClickFlow() {
     if (!sb) throw new Error("Supabase not initialized.");
 
     await step("🔑 Reading Supabase session...");
-    let session = null;
-    try {
-      const res = await withTimeout(sb.auth.getSession(), 8000, "Supabase getSession()");
-      session = res?.data?.session || null;
-    } catch (e) {
-      console.warn("getSession timeout/fail:", e);
-    }
-
+    const { data: { session } } = await withTimeout(sb.auth.getSession(), 8000, "Supabase getSession()");
     let accessToken = session?.access_token || localStorage.getItem("sb_access_token") || "";
     if (!accessToken) {
       await step("⚠️ No session token found. Redirecting to login...");
@@ -697,7 +689,7 @@ async function allocateClickFlow() {
 
 // ==================================================
 // ✅ CLICK HANDLING (SINGLE SOURCE OF TRUTH)
-//    - Uses event delegation so dynamic buttons work
+// ✅ FIX: normalize target (TEXT_NODE -> parentElement)
 // ==================================================
 let _delegationBound = false;
 function bindAllocateDelegation() {
@@ -707,24 +699,29 @@ function bindAllocateDelegation() {
   document.addEventListener(
     "click",
     async (e) => {
-      const t = e.target;
-      if (!(t instanceof Element)) return;
+      let el = e.target;
 
-      // Allocate button
-      const alloc = t.closest("#allocate-btn");
+      // ✅ Critical fix: if target is a text node, go to its parent element
+      if (el && el.nodeType === 3) el = el.parentElement; // Node.TEXT_NODE === 3
+      if (!(el instanceof Element)) return;
+
+      // Allocate
+      const alloc = el.closest("#allocate-btn");
       if (alloc) {
         e.preventDefault();
         e.stopPropagation();
         if (alloc.disabled) return;
+        console.log("✅ Allocate clicked (delegation)");
         await allocateClickFlow();
         return;
       }
 
-      // Resume stopped instance (dynamic)
-      const resume = t.closest("#resume-vm-btn");
+      // Resume stopped instance
+      const resume = el.closest("#resume-vm-btn");
       if (resume) {
         e.preventDefault();
         e.stopPropagation();
+        console.log("✅ Resume clicked (delegation)");
 
         const sm = document.getElementById("status-message");
         try {
@@ -737,11 +734,9 @@ function bindAllocateDelegation() {
             sm.textContent = "⏳ Resume requested. Waiting for VM to become RUNNING and get an IP...";
           }
 
-          // resume call (timeout tolerated)
           try {
             await startVm(info.accessToken, info.vm_id);
           } catch (err) {
-            // allow timeout and continue to poll
             if (!isTimeoutMessage(err)) throw err;
           }
 
@@ -766,11 +761,12 @@ function bindAllocateDelegation() {
         return;
       }
 
-      // Create new instance (terminate old) (dynamic)
-      const createNew = t.closest("#new-vm-btn");
+      // Create new instance (terminate old)
+      const createNew = el.closest("#new-vm-btn");
       if (createNew) {
         e.preventDefault();
         e.stopPropagation();
+        console.log("✅ Create new clicked (delegation)");
 
         const ok = confirm(
           "Creating a new instance will TERMINATE your old instance and ALL data on it will be lost permanently. Continue?"
@@ -816,7 +812,7 @@ function bindAllocateDelegation() {
 // ==================================================
 document.addEventListener("DOMContentLoaded", async () => {
   routeByPath();
-  bindAllocateDelegation(); // ✅ single click system for everything
+  bindAllocateDelegation();
 
   const sb = await getSb();
   if (!sb) return;
