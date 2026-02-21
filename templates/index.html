@@ -7,9 +7,21 @@
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
 
-  <!-- ✅ Safety: prevent accidental click-blocking overlays in simple pages -->
+  <!-- ✅ Click-safety rules to prevent invisible overlays stealing clicks -->
   <style>
     #loading-text { pointer-events: none; }
+    #status-message { pointer-events: none; }
+
+    /* Ensure allocate button is always clickable above nearby panels */
+    #allocate-btn {
+      position: relative;
+      z-index: 50;
+      pointer-events: auto;
+    }
+    #allocate-agent-panel {
+      position: relative;
+      z-index: 1;
+    }
   </style>
 
   <!-- Supabase -->
@@ -150,7 +162,8 @@
         <option value="4">4 GB</option>
       </select>
 
-      <button id="allocate-btn" type="button" disabled>Allocate</button>
+      <!-- ✅ IMPORTANT: Inline onclick fallback (works even if JS binding fails) -->
+      <button id="allocate-btn" type="button" disabled onclick="window.allocateClickFlow && window.allocateClickFlow()">Allocate</button>
 
       <p id="loading-text" style="display:none; color:blue;">Processing...</p>
       <p id="status-message"></p>

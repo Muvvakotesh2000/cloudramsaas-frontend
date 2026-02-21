@@ -1,11 +1,11 @@
-// frontend/static/script.js (FULL FILE — UPDATED: allocate click binding is bulletproof)
+// frontend/static/script.js (FULL FILE — UPDATED: allocate click binding is bulletproof + no double-run)
 // ✅ Fixes: Allocate button enabled but sometimes click does nothing
-// ✅ Strategy:
-//   - Bind click handler whenever Allocate page is shown (navigate)
-//   - Use dataset guard to prevent double-binding
-//   - Add event-delegation fallback (document-level listener) so even if DOM is replaced, click still works
-//   - Add very early console logs to confirm flow
-// ✅ Keeps your timeout-tolerant /my_vm polling behavior
+// ✅ Improvements over your current file:
+//   - Expose allocateClickFlow globally (window.allocateClickFlow) so inline/delegation always works
+//   - Add an in-flight lock so delegation + direct handler can’t trigger twice
+//   - Re-bind if the DOM node was replaced (dataset guard resets when node changes)
+//   - Add very clear logs to confirm which handler fired
+// ✅ Keeps your timeout-tolerant /my_vm polling behavior and STOPPED VM UI
 
 console.log("✅ script.js loaded");
 
@@ -240,7 +240,7 @@ function navigate(page, pushState = true) {
   if (page === "allocate") {
     // ✅ IMPORTANT: bind allocate click whenever allocate page is shown
     setTimeout(async () => {
-      bindAllocateButton();     // ✅ new
+      bindAllocateButton();             // ✅ ensure direct handler exists
       await updateAllocateGate();
       startAgentGatePolling();
 
@@ -580,7 +580,16 @@ async function getMyVmInfo(accessToken) {
   }, 90000); // ✅ longer for slow/cold networks
 }
 
+// ✅ prevents double triggering (direct handler + delegation)
+let _allocateInFlight = false;
+
 async function allocateClickFlow() {
+  if (_allocateInFlight) {
+    console.log("⛔ allocateClickFlow ignored (already running)");
+    return;
+  }
+  _allocateInFlight = true;
+
   console.log("🚀 allocateClickFlow START", new Date().toISOString());
 
   const sb = await getSb();
@@ -685,10 +694,14 @@ async function allocateClickFlow() {
       statusMessage.textContent = `❌ ${err.message || err}`;
     }
   } finally {
+    _allocateInFlight = false;
     setAllocateBusy(false);
     await updateAllocateGate();
   }
 }
+
+// ✅ MUST: expose globally so delegation/inline can always call it
+window.allocateClickFlow = allocateClickFlow;
 
 // ==================================================
 // ✅ Allocate button binding (NEW)
@@ -700,17 +713,19 @@ function bindAllocateButton() {
     return;
   }
 
-  // prevent double-binding
+  // If DOM replaced, it's a new node => dataset missing => will bind again (good)
   if (allocateBtn.dataset.bound === "1") return;
   allocateBtn.dataset.bound = "1";
 
   allocateBtn.addEventListener("click", async (e) => {
-    console.log("✅ Allocate button clicked", { disabled: allocateBtn.disabled });
+    console.log("✅ Allocate button clicked (direct handler)", { disabled: allocateBtn.disabled });
     e.preventDefault();
     e.stopPropagation();
 
+    if (allocateBtn.disabled) return;
+
     try {
-      await allocateClickFlow();
+      await window.allocateClickFlow();
     } catch (err) {
       console.error("allocateClickFlow crashed:", err);
       const sm = document.getElementById("status-message");
@@ -721,11 +736,11 @@ function bindAllocateButton() {
     }
   });
 
-  console.log("✅ Bound click handler to #allocate-btn");
+  console.log("✅ Bound direct click handler to #allocate-btn");
 }
 
 // Event delegation fallback: if SPA ever replaces the button node,
-// clicks still work.
+// clicks still work. Uses CAPTURE so it fires even if something stops bubbling.
 let _delegateBound = false;
 function bindAllocateDelegationFallback() {
   if (_delegateBound) return;
@@ -735,19 +750,17 @@ function bindAllocateDelegationFallback() {
     const t = e.target;
     if (!(t instanceof Element)) return;
 
-    // Only handle allocate button clicks
     const btn = t.closest("#allocate-btn");
     if (!btn) return;
 
-    // If normal handler already ran, no issue—this is just a safety net.
-    console.log("🛟 Delegation caught click on #allocate-btn");
+    console.log("🛟 Delegation caught click on #allocate-btn", { disabled: btn.disabled });
     e.preventDefault();
     e.stopPropagation();
 
-    // Avoid running if disabled
     if (btn.disabled) return;
 
-    await allocateClickFlow();
+    // Always call the global flow (works even if handler wasn't bound)
+    await window.allocateClickFlow();
   }, true);
 }
 
