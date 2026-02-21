@@ -1,8 +1,9 @@
-// frontend/static/script.js (FULL FILE — UPDATED: stopped-VM buttons bind directly + Supabase session timeout relaxed)
-// ✅ Fixes:
-//   - Supabase getSession() timing out at 8s -> use 30s + fallback to localStorage token
-//   - Resume/Create New buttons not working -> bind direct listeners right after innerHTML injection
-//   - Keep Allocate click via event delegation
+// frontend/static/script.js
+// ✅ FIXES:
+//   - renderStoppedVmChoices: always fetches fresh token (not stale passed-in token)
+//   - Resume/Terminate buttons: capturedVmId in closure, re-enable on error
+//   - Supabase getSession() timeout: 30s + localStorage fallback
+//   - Allocate buttons via event delegation
 
 console.log("✅ script.js loaded");
 
@@ -292,6 +293,25 @@ async function getSb() {
   return window._sbClient;
 }
 
+// ✅ Always gets freshest possible token — tries Supabase first, falls back to localStorage
+async function getFreshAccessToken() {
+  try {
+    const sb = await getSb();
+    if (sb) {
+      const { data: { session } } = await withTimeout(sb.auth.getSession(), 30000, "getSession");
+      if (session?.access_token) {
+        localStorage.setItem("sb_access_token", session.access_token);
+        return session.access_token;
+      }
+    }
+  } catch (e) {
+    console.warn("getFreshAccessToken: getSession failed, using localStorage fallback:", e);
+  }
+  const stored = localStorage.getItem("sb_access_token");
+  if (stored) return stored;
+  throw new Error("No auth token found. Please log out and log back in.");
+}
+
 async function refreshUIForSession() {
   const sb = await getSb();
   if (!sb) return;
@@ -466,9 +486,10 @@ async function pollVmUntilRunning(accessToken, {
 }
 
 // ==================================================
-// ✅ Existing VM UI (stopped) + DIRECT BUTTON BINDING
+// ✅ Existing VM UI (stopped) — FIXED
 // ==================================================
-function renderStoppedVmChoices(vmInfo, accessToken) {
+function renderStoppedVmChoices(vmInfo, _accessToken) {
+  // NOTE: _accessToken param is kept for API compat but we always fetch fresh below
   const statusMessage = document.getElementById("status-message");
   const allocateBtn = document.getElementById("allocate-btn");
   if (!statusMessage) return;
@@ -479,110 +500,151 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
   statusMessage.innerHTML = `
     <div style="margin-top:10px;">
       <div style="font-weight:bold;">🟡 Existing VM is STOPPED.</div>
-      <div style="margin-top:6px;">VM ID: ${vmInfo.vm_id}</div>
+      <div style="margin-top:6px; font-size:13px; opacity:0.85;">VM ID: ${vmInfo.vm_id}</div>
       <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
         <button id="resume-vm-btn" type="button"
-          style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
-          Resume stopped instance
+          style="padding:10px 16px; border-radius:6px; border:none; cursor:pointer;
+                 background:#00c4cc; color:white; font-size:15px;">
+          ▶ Resume stopped instance
         </button>
         <button id="new-vm-btn" type="button"
-          style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
-          Create new instance (terminate old)
+          style="padding:10px 16px; border-radius:6px; border:none; cursor:pointer;
+                 background:#ff5b5b; color:white; font-size:15px;">
+          ✕ Create new instance (terminate old)
         </button>
       </div>
-      <div style="margin-top:10px; font-size:13px; opacity:0.95;">
-        Creating a new instance will terminate the old one and data will be lost permanently.
+      <div style="margin-top:8px; font-size:12px; opacity:0.8;">
+        Terminating the old instance will permanently delete all its data.
       </div>
+      <p id="stopped-action-msg" style="margin-top:10px; font-weight:bold; min-height:1.4em;"></p>
     </div>
   `;
 
-  const resumeBtn = document.getElementById("resume-vm-btn");
-  const newBtn = document.getElementById("new-vm-btn");
+  // ✅ Capture vm_id in closure NOW — never read from global/localStorage at click time
+  const capturedVmId = vmInfo.vm_id;
 
-  if (resumeBtn) {
-    resumeBtn.onclick = async () => {
-      const sm = document.getElementById("status-message");
-      try {
-        setAllocateBusy(true, "Requesting resume (this can take several minutes)...");
-        if (sm) {
-          sm.style.color = "white";
-          sm.textContent = "⏳ Resume requested. Waiting for VM to become RUNNING and get an IP...";
-        }
-
-        const base = await apiBase();
-
-        // request resume (timeout is okay)
-        try {
-          await fetchJsonWithTimeout(`${base}/start_vm`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${accessToken}`,
-            },
-            body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-          }, 25000);
-        } catch (e) {
-          if (!isTimeoutMessage(e)) throw e;
-        }
-
-        await pollVmUntilRunning(accessToken, {
-          maxMinutes: 15,
-          intervalMs: 5000,
-          requestTimeoutMs: 90000,
-          statusPrefix: "⏳ Resuming:",
-        });
-
-        window.location.href = "/status";
-      } catch (e) {
-        if (sm) {
-          sm.style.color = "crimson";
-          sm.textContent = `❌ Resume failed: ${e.message || e}`;
-        }
-      } finally {
-        setAllocateBusy(false);
-        await updateAllocateGate();
-      }
-    };
+  function setMsg(text, color) {
+    const el = document.getElementById("stopped-action-msg");
+    if (el) { el.textContent = text; el.style.color = color || "white"; }
   }
 
-  if (newBtn) {
-    newBtn.onclick = async () => {
-      const ok = confirm(
-        "Creating a new instance will TERMINATE your old instance and ALL data on it will be lost permanently. Continue?"
-      );
-      if (!ok) return;
+  function disableBtns() {
+    const r = document.getElementById("resume-vm-btn");
+    const n = document.getElementById("new-vm-btn");
+    if (r) r.disabled = true;
+    if (n) n.disabled = true;
+  }
 
-      const sm = document.getElementById("status-message");
+  function enableBtns() {
+    const r = document.getElementById("resume-vm-btn");
+    const n = document.getElementById("new-vm-btn");
+    if (r) r.disabled = false;
+    if (n) n.disabled = false;
+  }
+
+  // ✅ Always fetch a fresh token at click time
+  async function getFreshToken() {
+    try {
+      const sb = await getSb();
+      if (sb) {
+        const { data: { session } } = await sb.auth.getSession();
+        if (session?.access_token) {
+          localStorage.setItem("sb_access_token", session.access_token);
+          return session.access_token;
+        }
+      }
+    } catch (e) {
+      console.warn("getSession failed, falling back to localStorage:", e);
+    }
+    const stored = localStorage.getItem("sb_access_token");
+    if (stored) return stored;
+    throw new Error("No auth token. Please log out and log back in.");
+  }
+
+  document.getElementById("resume-vm-btn").onclick = async function () {
+    console.log("▶️ Resume clicked, vm_id:", capturedVmId);
+    try {
+      disableBtns();
+      setMsg("⏳ Authenticating...");
+
+      const token = await getFreshToken();
+      console.log("▶️ Token obtained, calling start_vm...");
+      setMsg("⏳ Requesting resume (may take a few minutes)...");
+
+      const base = await apiBase();
       try {
-        setAllocateBusy(true, "Terminating old VM...");
-
-        const base = await apiBase();
-        await fetchJsonWithTimeout(`${base}/terminate_vm`, {
+        await fetchJsonWithTimeout(`${base}/start_vm`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${accessToken}`,
+            "Authorization": `Bearer ${token}`,
           },
-          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-        }, 90000);
-
-        if (allocateBtn) allocateBtn.style.display = "inline-block";
-
-        if (sm) {
-          sm.style.color = "lightgreen";
-          sm.textContent = "✅ Old VM terminated. Click Allocate again to create a new instance.";
-        }
+          body: JSON.stringify({ vm_id: capturedVmId }),
+        }, 25000);
       } catch (e) {
-        if (sm) {
-          sm.style.color = "crimson";
-          sm.textContent = `❌ Could not terminate old VM: ${e.message || e}`;
-        }
-      } finally {
-        setAllocateBusy(false);
-        await updateAllocateGate();
+        // A timeout here is normal — the VM starts async
+        if (!isTimeoutMessage(e)) throw e;
+        console.warn("start_vm timed out (expected for async start), continuing to poll...");
       }
-    };
-  }
+
+      setMsg("⏳ Waiting for VM to become RUNNING...");
+      await pollVmUntilRunning(token, {
+        maxMinutes: 15,
+        intervalMs: 5000,
+        requestTimeoutMs: 90000,
+        statusPrefix: "⏳ Resuming:",
+      });
+
+      setMsg("✅ VM is running! Opening dashboard...", "lightgreen");
+      await sleep(600);
+      window.location.href = "/status";
+
+    } catch (e) {
+      console.error("Resume failed:", e);
+      setMsg(`❌ Resume failed: ${e.message || e}`, "crimson");
+      enableBtns();
+    }
+  };
+
+  document.getElementById("new-vm-btn").onclick = async function () {
+    console.log("🗑️ Terminate clicked, vm_id:", capturedVmId);
+    const ok = confirm(
+      "Creating a new instance will TERMINATE your old instance — all data will be permanently lost. Continue?"
+    );
+    if (!ok) return;
+
+    try {
+      disableBtns();
+      setMsg("⏳ Authenticating...");
+
+      const token = await getFreshToken();
+      console.log("🗑️ Token obtained, calling terminate_vm...");
+      setMsg("⏳ Terminating old VM...");
+
+      const base = await apiBase();
+      await fetchJsonWithTimeout(`${base}/terminate_vm`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+        },
+        body: JSON.stringify({ vm_id: capturedVmId }),
+      }, 90000);
+
+      localStorage.removeItem("vm_id");
+      localStorage.removeItem("vm_ip");
+
+      if (allocateBtn) allocateBtn.style.display = "inline-block";
+      setMsg("✅ Old VM terminated. Click Allocate to create a new instance.", "lightgreen");
+
+    } catch (e) {
+      console.error("Terminate failed:", e);
+      setMsg(`❌ Terminate failed: ${e.message || e}`, "crimson");
+      enableBtns();
+    }
+  };
+
+  console.log("✅ renderStoppedVmChoices: buttons bound for vm_id:", capturedVmId);
 }
 
 // ==================================================
@@ -629,27 +691,8 @@ async function allocateClickFlow() {
       return;
     }
 
-    await step("🔐 Preparing Supabase client...");
-    const sb = await withTimeout(getSb(), 12000, "Supabase init");
-    if (!sb) throw new Error("Supabase not initialized.");
-
-    // ✅ BIG FIX: don’t hard-fail at 8s; try 30s, then fallback to localStorage
-    await step("🔑 Reading Supabase session...");
-    let accessToken = localStorage.getItem("sb_access_token") || "";
-
-    try {
-      const sessResp = await withTimeout(sb.auth.getSession(), 30000, "Supabase getSession()");
-      const session = sessResp?.data?.session;
-      if (session?.access_token) accessToken = session.access_token;
-    } catch (e) {
-      console.warn("Supabase getSession failed/timed out. Using localStorage token if available.", e);
-    }
-
-    if (!accessToken) {
-      await step("⚠️ No session token found. Redirecting to login...");
-      navigate("login");
-      return;
-    }
+    await step("🔑 Getting auth token...");
+    const accessToken = await getFreshAccessToken();
     localStorage.setItem("sb_access_token", accessToken);
 
     setAllocateBusy(true, "Checking existing VM...");
@@ -729,8 +772,10 @@ async function allocateClickFlow() {
   }
 }
 
+window.allocateClickFlow = allocateClickFlow;
+
 // ==================================================
-// ✅ Allocate click handling (delegation only for Allocate)
+// ✅ Allocate click — event delegation
 // ==================================================
 let _allocDelegationBound = false;
 function bindAllocateDelegation() {
@@ -781,11 +826,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       startAgentGatePolling();
     }
   });
-
-  const allocateBtn = document.getElementById("allocate-btn");
-  if (allocateBtn) {
-    // keep disabled logic from gate
-  }
 
   const retry = document.getElementById("allocate-agent-retry");
   if (retry) {
