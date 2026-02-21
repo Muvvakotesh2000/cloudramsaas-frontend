@@ -1,6 +1,11 @@
-// frontend/static/script.js (FULL FILE — corrected again: my_vm polling is timeout-tolerant)
-// ✅ Resume/Allocate will NOT fail on a single my_vm timeout
-// ✅ my_vm polling uses longer per-request timeout + keeps retrying until overall max time
+// frontend/static/script.js (FULL FILE — UPDATED: allocate click binding is bulletproof)
+// ✅ Fixes: Allocate button enabled but sometimes click does nothing
+// ✅ Strategy:
+//   - Bind click handler whenever Allocate page is shown (navigate)
+//   - Use dataset guard to prevent double-binding
+//   - Add event-delegation fallback (document-level listener) so even if DOM is replaced, click still works
+//   - Add very early console logs to confirm flow
+// ✅ Keeps your timeout-tolerant /my_vm polling behavior
 
 console.log("✅ script.js loaded");
 
@@ -233,7 +238,9 @@ function navigate(page, pushState = true) {
   }
 
   if (page === "allocate") {
+    // ✅ IMPORTANT: bind allocate click whenever allocate page is shown
     setTimeout(async () => {
+      bindAllocateButton();     // ✅ new
       await updateAllocateGate();
       startAgentGatePolling();
 
@@ -463,10 +470,10 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
       <div style="font-weight:bold;">🟡 Existing VM is STOPPED.</div>
       <div style="margin-top:6px;">VM ID: ${vmInfo.vm_id}</div>
       <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <button id="resume-vm-btn" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
+        <button id="resume-vm-btn" type="button" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
           Resume stopped instance
         </button>
-        <button id="new-vm-btn" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
+        <button id="new-vm-btn" type="button" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
           Create new instance (terminate old)
         </button>
       </div>
@@ -574,6 +581,8 @@ async function getMyVmInfo(accessToken) {
 }
 
 async function allocateClickFlow() {
+  console.log("🚀 allocateClickFlow START", new Date().toISOString());
+
   const sb = await getSb();
   const statusMessage = document.getElementById("status-message");
   const ramSize = parseInt(document.getElementById("ram")?.value || "1", 10);
@@ -670,6 +679,7 @@ async function allocateClickFlow() {
     await sleep(350);
     window.location.href = "/status";
   } catch (err) {
+    console.error("allocateClickFlow error:", err);
     if (statusMessage) {
       statusMessage.style.color = "crimson";
       statusMessage.textContent = `❌ ${err.message || err}`;
@@ -681,15 +691,82 @@ async function allocateClickFlow() {
 }
 
 // ==================================================
+// ✅ Allocate button binding (NEW)
+// ==================================================
+function bindAllocateButton() {
+  const allocateBtn = document.getElementById("allocate-btn");
+  if (!allocateBtn) {
+    console.warn("bindAllocateButton: #allocate-btn not found");
+    return;
+  }
+
+  // prevent double-binding
+  if (allocateBtn.dataset.bound === "1") return;
+  allocateBtn.dataset.bound = "1";
+
+  allocateBtn.addEventListener("click", async (e) => {
+    console.log("✅ Allocate button clicked", { disabled: allocateBtn.disabled });
+    e.preventDefault();
+    e.stopPropagation();
+
+    try {
+      await allocateClickFlow();
+    } catch (err) {
+      console.error("allocateClickFlow crashed:", err);
+      const sm = document.getElementById("status-message");
+      if (sm) {
+        sm.style.color = "crimson";
+        sm.textContent = `❌ ${err?.message || err}`;
+      }
+    }
+  });
+
+  console.log("✅ Bound click handler to #allocate-btn");
+}
+
+// Event delegation fallback: if SPA ever replaces the button node,
+// clicks still work.
+let _delegateBound = false;
+function bindAllocateDelegationFallback() {
+  if (_delegateBound) return;
+  _delegateBound = true;
+
+  document.addEventListener("click", async (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+
+    // Only handle allocate button clicks
+    const btn = t.closest("#allocate-btn");
+    if (!btn) return;
+
+    // If normal handler already ran, no issue—this is just a safety net.
+    console.log("🛟 Delegation caught click on #allocate-btn");
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Avoid running if disabled
+    if (btn.disabled) return;
+
+    await allocateClickFlow();
+  }, true);
+}
+
+// ==================================================
 // ✅ INIT
 // ==================================================
 document.addEventListener("DOMContentLoaded", async () => {
   routeByPath();
 
+  // Always bind delegation fallback once
+  bindAllocateDelegationFallback();
+
   const sb = await getSb();
   if (!sb) return;
 
   await refreshUIForSession();
+
+  // After session routing, ensure allocate handler exists if we're on allocate
+  bindAllocateButton();
 
   if (window.location.pathname.toLowerCase() === "/allocate") {
     await updateAllocateGate();
@@ -698,14 +775,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   sb.auth.onAuthStateChange(async () => {
     await refreshUIForSession();
+    bindAllocateButton(); // ✅ rebind after auth changes can re-render view
     if (window.location.pathname.toLowerCase() === "/allocate") {
       await updateAllocateGate();
       startAgentGatePolling();
     }
   });
-
-  const allocateBtn = document.getElementById("allocate-btn");
-  if (allocateBtn) allocateBtn.addEventListener("click", allocateClickFlow);
 
   const retry = document.getElementById("allocate-agent-retry");
   if (retry) {

@@ -7,6 +7,11 @@
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
 
+  <!-- ✅ Safety: prevent accidental click-blocking overlays in simple pages -->
+  <style>
+    #loading-text { pointer-events: none; }
+  </style>
+
   <!-- Supabase -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
