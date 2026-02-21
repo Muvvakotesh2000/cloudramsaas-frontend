@@ -1,11 +1,8 @@
-// frontend/static/script.js (FULL FILE — UPDATED: fixes Allocate click “hang” without refresh)
-// ✅ Fixes: Allocate button sometimes “clicks” but doesn’t proceed to /my_vm until refresh
-// ✅ Root cause (most common): Supabase getSession() can hang / be slow in SPA timing
-// ✅ Fix:
-//   - Step-by-step status updates so we see where it’s stuck
-//   - Hard timeouts on agent check + Supabase init + getSession + /my_vm
-//   - Fallback to localStorage sb_access_token if getSession is slow/hangs
-//   - In-flight guard so repeated clicks don’t wedge the UI
+// frontend/static/script.js (FULL FILE — UPDATED: Allocate + Resume/New buttons bulletproof)
+// ✅ Fixes:
+//   - Allocate click sometimes prints but doesn't proceed (timeouts + token fallback + step UI)
+//   - Resume instance / Create new instance buttons not working (dynamic HTML + event delegation)
+//   - Removes double-binding on #allocate-btn
 
 console.log("✅ script.js loaded");
 
@@ -276,7 +273,6 @@ function navigate(page, pushState = true) {
 
   if (page === "allocate") {
     setTimeout(async () => {
-      bindAllocateButton(); // ensure click is always bound when showing allocate page
       await updateAllocateGate();
       startAgentGatePolling();
 
@@ -502,10 +498,12 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
       <div style="font-weight:bold;">🟡 Existing VM is STOPPED.</div>
       <div style="margin-top:6px;">VM ID: ${vmInfo.vm_id}</div>
       <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <button id="resume-vm-btn" type="button" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
+        <button id="resume-vm-btn" type="button"
+          style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
           Resume stopped instance
         </button>
-        <button id="new-vm-btn" type="button" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
+        <button id="new-vm-btn" type="button"
+          style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
           Create new instance (terminate old)
         </button>
       </div>
@@ -515,96 +513,37 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
     </div>
   `;
 
-  const resumeBtn = document.getElementById("resume-vm-btn");
-  const newBtn = document.getElementById("new-vm-btn");
+  // store current vm info for delegation handlers
+  window.__stoppedVmInfo = { vm_id: vmInfo.vm_id, accessToken };
+}
 
-  if (resumeBtn) {
-    resumeBtn.addEventListener("click", async () => {
-      try {
-        setAllocateBusy(true, "Requesting resume (this can take several minutes)...");
+// ==================================================
+// ✅ API helpers for stopped VM actions
+// ==================================================
+async function startVm(accessToken, vm_id) {
+  const base = await apiBase();
+  return await fetchJsonWithTimeout(
+    `${base}/start_vm`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ vm_id }),
+    },
+    25000
+  );
+}
 
-        const base = await apiBase();
-
-        try {
-          await fetchJsonWithTimeout(
-            `${base}/start_vm`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${accessToken}`,
-              },
-              body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-            },
-            25000
-          );
-        } catch (e) {
-          if (!isTimeoutMessage(e)) throw e;
-          const sm = document.getElementById("status-message");
-          if (sm) {
-            sm.style.color = "white";
-            sm.textContent = "⏳ Resume requested. Waiting for VM to become RUNNING and get an IP...";
-          }
-        }
-
-        await pollVmUntilRunning(accessToken, {
-          maxMinutes: 15,
-          intervalMs: 5000,
-          requestTimeoutMs: 90000,
-          statusPrefix: "⏳ Resuming:",
-        });
-
-        window.location.href = "/status";
-      } catch (e) {
-        const sm = document.getElementById("status-message");
-        if (sm) {
-          sm.style.color = "crimson";
-          sm.textContent = `❌ Resume failed: ${e.message || e}`;
-        }
-      } finally {
-        setAllocateBusy(false);
-        await updateAllocateGate();
-      }
-    });
-  }
-
-  if (newBtn) {
-    newBtn.addEventListener("click", async () => {
-      const ok = confirm(
-        "Creating a new instance will TERMINATE your old instance and ALL data on it will be lost permanently. Continue?"
-      );
-      if (!ok) return;
-
-      try {
-        setAllocateBusy(true, "Terminating old VM...");
-
-        const base = await apiBase();
-        await fetchJsonWithTimeout(
-          `${base}/terminate_vm`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${accessToken}`,
-            },
-            body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-          },
-          90000
-        );
-
-        if (allocateBtn) allocateBtn.style.display = "inline-block";
-
-        statusMessage.style.color = "white";
-        statusMessage.textContent = "✅ Old VM terminated. Click Allocate again to create a new instance.";
-      } catch (e) {
-        statusMessage.style.color = "crimson";
-        statusMessage.textContent = `❌ Could not terminate old VM: ${e.message || e}`;
-      } finally {
-        setAllocateBusy(false);
-        await updateAllocateGate();
-      }
-    });
-  }
+async function terminateVm(accessToken, vm_id) {
+  const base = await apiBase();
+  return await fetchJsonWithTimeout(
+    `${base}/terminate_vm`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ vm_id }),
+    },
+    90000
+  );
 }
 
 // ==================================================
@@ -717,10 +656,7 @@ async function allocateClickFlow() {
           `${base}/allocate`,
           {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${accessToken}`,
-            },
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
             body: JSON.stringify({ ram_size: ramSize }),
           },
           25000
@@ -760,27 +696,119 @@ async function allocateClickFlow() {
 }
 
 // ==================================================
-// ✅ Allocate button binding
+// ✅ CLICK HANDLING (SINGLE SOURCE OF TRUTH)
+//    - Uses event delegation so dynamic buttons work
 // ==================================================
-function bindAllocateButton() {
-  const allocateBtn = document.getElementById("allocate-btn");
-  if (!allocateBtn) {
-    console.warn("bindAllocateButton: #allocate-btn not found");
-    return;
-  }
+let _delegationBound = false;
+function bindAllocateDelegation() {
+  if (_delegationBound) return;
+  _delegationBound = true;
 
-  if (allocateBtn.dataset.bound === "1") return;
-  allocateBtn.dataset.bound = "1";
+  document.addEventListener(
+    "click",
+    async (e) => {
+      const t = e.target;
+      if (!(t instanceof Element)) return;
 
-  allocateBtn.addEventListener("click", async (e) => {
-    console.log("✅ Allocate button clicked", { disabled: allocateBtn.disabled });
-    e.preventDefault();
-    e.stopPropagation();
-    if (allocateBtn.disabled) return;
-    await allocateClickFlow();
-  });
+      // Allocate button
+      const alloc = t.closest("#allocate-btn");
+      if (alloc) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (alloc.disabled) return;
+        await allocateClickFlow();
+        return;
+      }
 
-  console.log("✅ Bound click handler to #allocate-btn");
+      // Resume stopped instance (dynamic)
+      const resume = t.closest("#resume-vm-btn");
+      if (resume) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const sm = document.getElementById("status-message");
+        try {
+          const info = window.__stoppedVmInfo;
+          if (!info?.vm_id || !info?.accessToken) throw new Error("Missing stopped VM context.");
+
+          setAllocateBusy(true, "Requesting resume (this can take several minutes)...");
+          if (sm) {
+            sm.style.color = "white";
+            sm.textContent = "⏳ Resume requested. Waiting for VM to become RUNNING and get an IP...";
+          }
+
+          // resume call (timeout tolerated)
+          try {
+            await startVm(info.accessToken, info.vm_id);
+          } catch (err) {
+            // allow timeout and continue to poll
+            if (!isTimeoutMessage(err)) throw err;
+          }
+
+          await pollVmUntilRunning(info.accessToken, {
+            maxMinutes: 15,
+            intervalMs: 5000,
+            requestTimeoutMs: 90000,
+            statusPrefix: "⏳ Resuming:",
+          });
+
+          window.location.href = "/status";
+        } catch (err) {
+          console.error("Resume failed:", err);
+          if (sm) {
+            sm.style.color = "crimson";
+            sm.textContent = `❌ Resume failed: ${err.message || err}`;
+          }
+        } finally {
+          setAllocateBusy(false);
+          await updateAllocateGate();
+        }
+        return;
+      }
+
+      // Create new instance (terminate old) (dynamic)
+      const createNew = t.closest("#new-vm-btn");
+      if (createNew) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const ok = confirm(
+          "Creating a new instance will TERMINATE your old instance and ALL data on it will be lost permanently. Continue?"
+        );
+        if (!ok) return;
+
+        const sm = document.getElementById("status-message");
+        try {
+          const info = window.__stoppedVmInfo;
+          if (!info?.vm_id || !info?.accessToken) throw new Error("Missing stopped VM context.");
+
+          setAllocateBusy(true, "Terminating old VM...");
+          await terminateVm(info.accessToken, info.vm_id);
+
+          const allocateBtn = document.getElementById("allocate-btn");
+          if (allocateBtn) allocateBtn.style.display = "inline-block";
+
+          if (sm) {
+            sm.style.color = "lightgreen";
+            sm.textContent = "✅ Old VM terminated. Click Allocate again to create a new instance.";
+          }
+        } catch (err) {
+          console.error("Terminate failed:", err);
+          if (sm) {
+            sm.style.color = "crimson";
+            sm.textContent = `❌ Could not terminate old VM: ${err.message || err}`;
+          }
+        } finally {
+          setAllocateBusy(false);
+          await updateAllocateGate();
+        }
+        return;
+      }
+    },
+    true
+  );
+
+  console.log("✅ Delegation click handlers bound (allocate + resume/new)");
 }
 
 // ==================================================
@@ -788,14 +816,12 @@ function bindAllocateButton() {
 // ==================================================
 document.addEventListener("DOMContentLoaded", async () => {
   routeByPath();
+  bindAllocateDelegation(); // ✅ single click system for everything
 
   const sb = await getSb();
   if (!sb) return;
 
   await refreshUIForSession();
-
-  // Ensure binding exists after routing
-  bindAllocateButton();
 
   if (window.location.pathname.toLowerCase() === "/allocate") {
     await updateAllocateGate();
@@ -804,15 +830,11 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   sb.auth.onAuthStateChange(async () => {
     await refreshUIForSession();
-    bindAllocateButton();
     if (window.location.pathname.toLowerCase() === "/allocate") {
       await updateAllocateGate();
       startAgentGatePolling();
     }
   });
-
-  const allocateBtn = document.getElementById("allocate-btn");
-  if (allocateBtn) allocateBtn.addEventListener("click", allocateClickFlow);
 
   const retry = document.getElementById("allocate-agent-retry");
   if (retry) {
