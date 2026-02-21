@@ -1,11 +1,11 @@
-// frontend/static/script.js (FULL FILE — UPDATED: allocate wiring cannot be lost)
-// ✅ Fixes: Allocate button enabled but sometimes click does nothing until refresh
-// ✅ Strategy (strongest possible):
-//   1) Direct addEventListener binding (normal)
-//   2) Document capture delegation fallback
-//   3) Inline onclick fallback (btn.onclick = ...) so even if listeners drop, click still works
-//   4) Re-wire watchdog while on /allocate (handles DOM replacement/timing)
-// ✅ Keeps your timeout-tolerant /my_vm polling behavior and STOPPED VM UI
+// frontend/static/script.js (FULL FILE — UPDATED: fixes Allocate click “hang” without refresh)
+// ✅ Fixes: Allocate button sometimes “clicks” but doesn’t proceed to /my_vm until refresh
+// ✅ Root cause (most common): Supabase getSession() can hang / be slow in SPA timing
+// ✅ Fix:
+//   - Step-by-step status updates so we see where it’s stuck
+//   - Hard timeouts on agent check + Supabase init + getSession + /my_vm
+//   - Fallback to localStorage sb_access_token if getSession is slow/hangs
+//   - In-flight guard so repeated clicks don’t wedge the UI
 
 console.log("✅ script.js loaded");
 
@@ -55,10 +55,15 @@ async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 30000) {
     const text = await r.text();
 
     let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
 
     if (!r.ok) {
-      const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
+      const detail =
+        data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
       throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     }
     return data;
@@ -70,11 +75,33 @@ async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 30000) {
   }
 }
 
+// Hard-timeout wrapper for “hanging awaits”
+async function withTimeout(promise, timeoutMs, label = "operation") {
+  let t;
+  const timeoutPromise = new Promise((_, reject) => {
+    t = setTimeout(
+      () => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)),
+      timeoutMs
+    );
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Let UI paint before long awaits
+async function paint() {
+  await new Promise((r) => setTimeout(r, 0));
+}
+
 async function isAgentOnline() {
   try {
     const r = await fetchWithTimeout(`${agentBase()}/health`, { cache: "no-store" }, 2500);
     return r.ok;
-  } catch {
+  } catch (e) {
+    console.warn("isAgentOnline failed:", e);
     return false;
   }
 }
@@ -147,13 +174,11 @@ function setAllocateBusy(isBusy, msg = "") {
 async function updateAllocateGate() {
   const ok = await isAgentOnline();
   if (ok) setGateStatus(true, "✅ Local Agent is running. Click Allocate to continue.");
-  else setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
+  else
+    setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
 
   const allocateBtn = document.getElementById("allocate-btn");
   if (allocateBtn) allocateBtn.style.display = "inline-block";
-
-  // ✅ ensure wiring whenever gate updates (common moment where user clicks)
-  ensureAllocateWiring();
 }
 
 // ✅ Poll agent for a short period (helps on refresh/slow startup)
@@ -167,15 +192,16 @@ function startAgentGatePolling() {
     const allocateBtn = document.getElementById("allocate-btn");
 
     if (ok) {
-      if (allocateBtn && allocateBtn.disabled && document.getElementById("loading-text")?.style.display !== "block") {
+      if (
+        allocateBtn &&
+        allocateBtn.disabled &&
+        document.getElementById("loading-text")?.style.display !== "block"
+      ) {
         setGateStatus(true, "✅ Local Agent is running. Click Allocate to continue.");
       }
       clearInterval(_agentPollTimer);
       _agentPollTimer = null;
     }
-
-    // ✅ keep wiring alive while we poll
-    ensureAllocateWiring();
   }, 1200);
 }
 
@@ -186,18 +212,18 @@ function buildInstallCommand() {
   return [
     '$ErrorActionPreference="Stop"',
     '$dest="C:\\CloudRAMS\\LocalAgent"',
-    'New-Item -ItemType Directory -Force -Path $dest | Out-Null',
+    "New-Item -ItemType Directory -Force -Path $dest | Out-Null",
     'Write-Host "Downloading LocalAgent zip..."',
     `Invoke-WebRequest -Uri "${AGENT_ZIP_URL}" -OutFile "$env:TEMP\\LocalAgent.zip"`,
     'Write-Host "Extracting..."',
     'Expand-Archive -Path "$env:TEMP\\LocalAgent.zip" -DestinationPath $dest -Force',
-    '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
+    "$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1",
     'if (-not $root) { throw "Could not find extracted folder inside destination." }',
-    'Set-Location $root.FullName',
+    "Set-Location $root.FullName",
     'Write-Host "Creating venv..."',
-    'python -m venv .venv',
+    "python -m venv .venv",
     'Write-Host "Installing requirements..."',
-    '.\\.venv\\Scripts\\pip.exe install -r requirements.txt',
+    ".\\.venv\\Scripts\\pip.exe install -r requirements.txt",
     'Write-Host "✅ Install complete. Next: run the agent."',
   ].join(" ; ");
 }
@@ -206,10 +232,10 @@ function buildRunCommand() {
   return [
     '$ErrorActionPreference="Stop"',
     '$dest="C:\\CloudRAMS\\LocalAgent"',
-    '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
+    "$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1",
     'if (-not $root) { throw "Agent folder not found. Run install first." }',
-    'Set-Location $root.FullName',
-    '.\\.venv\\Scripts\\python.exe agent_main.py',
+    "Set-Location $root.FullName",
+    ".\\.venv\\Scripts\\python.exe agent_main.py",
   ].join(" ; ");
 }
 
@@ -232,22 +258,25 @@ function navigate(page, pushState = true) {
   if (target) target.style.display = "block";
 
   const nav = document.getElementById("nav");
-  if (nav) nav.style.display = (page === "login" || page === "register") ? "none" : "block";
+  if (nav) nav.style.display = page === "login" || page === "register" ? "none" : "block";
 
   if (pushState) {
     const newPath =
-      page === "login" ? "/login" :
-      page === "register" ? "/register" :
-      page === "home" ? "/" :
-      page === "allocate" ? "/allocate" : "/";
+      page === "login"
+        ? "/login"
+        : page === "register"
+        ? "/register"
+        : page === "home"
+        ? "/"
+        : page === "allocate"
+        ? "/allocate"
+        : "/";
     window.history.pushState({}, "", newPath);
   }
 
   if (page === "allocate") {
     setTimeout(async () => {
-      // ✅ make sure button always wired when showing allocate page
-      ensureAllocateWiring();
-
+      bindAllocateButton(); // ensure click is always bound when showing allocate page
       await updateAllocateGate();
       startAgentGatePolling();
 
@@ -309,9 +338,6 @@ async function refreshUIForSession() {
 
   const userEmailEl = document.getElementById("user-email");
   if (userEmailEl) userEmailEl.textContent = `Logged in as: ${session.user.email}`;
-
-  // ✅ after routing, ensure wiring
-  ensureAllocateWiring();
 }
 
 // ==================================================
@@ -373,8 +399,6 @@ async function login() {
     const path = window.location.pathname.toLowerCase();
     if (path === "/allocate") navigate("allocate");
     else navigate("home");
-
-    ensureAllocateWiring();
   } catch (e) {
     if (errorEl) errorEl.textContent = "Unexpected login error. Check console.";
   }
@@ -414,15 +438,13 @@ window.logout = logout;
 // ==================================================
 // ✅ VM polling (timeout-tolerant)
 // ==================================================
-async function pollVmUntilRunning(accessToken, {
-  maxMinutes = 15,
-  intervalMs = 5000,
-  requestTimeoutMs = 90000,
-  statusPrefix = "⏳"
-} = {}) {
+async function pollVmUntilRunning(
+  accessToken,
+  { maxMinutes = 15, intervalMs = 5000, requestTimeoutMs = 90000, statusPrefix = "⏳" } = {}
+) {
   const base = await apiBase();
   const url = `${base}/my_vm`;
-  const headers = { "Authorization": `Bearer ${accessToken}` };
+  const headers = { Authorization: `Bearer ${accessToken}` };
 
   const endAt = Date.now() + maxMinutes * 60 * 1000;
   let attempt = 0;
@@ -504,14 +526,18 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
         const base = await apiBase();
 
         try {
-          await fetchJsonWithTimeout(`${base}/start_vm`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${accessToken}`,
+          await fetchJsonWithTimeout(
+            `${base}/start_vm`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${accessToken}`,
+              },
+              body: JSON.stringify({ vm_id: vmInfo.vm_id }),
             },
-            body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-          }, 25000);
+            25000
+          );
         } catch (e) {
           if (!isTimeoutMessage(e)) throw e;
           const sm = document.getElementById("status-message");
@@ -525,7 +551,7 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
           maxMinutes: 15,
           intervalMs: 5000,
           requestTimeoutMs: 90000,
-          statusPrefix: "⏳ Resuming:"
+          statusPrefix: "⏳ Resuming:",
         });
 
         window.location.href = "/status";
@@ -553,14 +579,18 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
         setAllocateBusy(true, "Terminating old VM...");
 
         const base = await apiBase();
-        await fetchJsonWithTimeout(`${base}/terminate_vm`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${accessToken}`,
+        await fetchJsonWithTimeout(
+          `${base}/terminate_vm`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({ vm_id: vmInfo.vm_id }),
           },
-          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-        }, 90000);
+          90000
+        );
 
         if (allocateBtn) allocateBtn.style.display = "inline-block";
 
@@ -582,12 +612,13 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
 // ==================================================
 async function getMyVmInfo(accessToken) {
   const base = await apiBase();
-  return await fetchJsonWithTimeout(`${base}/my_vm`, {
-    headers: { "Authorization": `Bearer ${accessToken}` }
-  }, 90000);
+  return await fetchJsonWithTimeout(
+    `${base}/my_vm`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+    90000
+  );
 }
 
-// ✅ prevents double triggering
 let _allocateInFlight = false;
 
 async function allocateClickFlow() {
@@ -597,19 +628,21 @@ async function allocateClickFlow() {
   }
   _allocateInFlight = true;
 
-  console.log("🚀 allocateClickFlow START", new Date().toISOString());
-
-  const sb = await getSb();
   const statusMessage = document.getElementById("status-message");
-  const ramSize = parseInt(document.getElementById("ram")?.value || "1", 10);
-
-  try {
+  const step = async (msg) => {
+    console.log(msg);
     if (statusMessage) {
       statusMessage.style.color = "white";
-      statusMessage.textContent = "✅ Click received. Starting allocation flow...";
+      statusMessage.textContent = msg;
     }
+    await paint();
+  };
 
-    const agentOk = await isAgentOnline();
+  try {
+    await step("✅ Click received. Starting allocation flow...");
+
+    await step("🔎 Checking Local Agent health...");
+    const agentOk = await withTimeout(isAgentOnline(), 4000, "Agent health check");
     if (!agentOk) {
       setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
       if (statusMessage) {
@@ -620,17 +653,30 @@ async function allocateClickFlow() {
       return;
     }
 
-    const { data: { session } } = await sb.auth.getSession();
-    if (!session) {
+    await step("🔐 Preparing Supabase client...");
+    const sb = await withTimeout(getSb(), 8000, "Supabase init");
+    if (!sb) throw new Error("Supabase not initialized.");
+
+    await step("🔑 Reading Supabase session...");
+    let session = null;
+    try {
+      const res = await withTimeout(sb.auth.getSession(), 8000, "Supabase getSession()");
+      session = res?.data?.session || null;
+    } catch (e) {
+      console.warn("getSession timeout/fail:", e);
+    }
+
+    let accessToken = session?.access_token || localStorage.getItem("sb_access_token") || "";
+    if (!accessToken) {
+      await step("⚠️ No session token found. Redirecting to login...");
       navigate("login");
       return;
     }
-    const accessToken = session.access_token;
     localStorage.setItem("sb_access_token", accessToken);
 
     setAllocateBusy(true, "Checking existing VM...");
-
-    const info = await getMyVmInfo(accessToken);
+    await step("🖥️ Checking existing VM (/my_vm)...");
+    const info = await withTimeout(getMyVmInfo(accessToken), 95000, "/my_vm request");
 
     if (info?.vm_id) localStorage.setItem("vm_id", info.vm_id);
     if (info?.ip) localStorage.setItem("vm_ip", info.ip);
@@ -659,32 +705,39 @@ async function allocateClickFlow() {
       return;
     }
 
+    const ramSize = parseInt(document.getElementById("ram")?.value || "1", 10);
     setAllocateBusy(true, "Allocating new VM (can take 10–15 minutes)...");
+    await step("🆕 No VM found. Requesting allocation...");
 
     const base = await apiBase();
 
     try {
-      await fetchJsonWithTimeout(`${base}/allocate`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({ ram_size: ramSize }),
-      }, 25000);
+      await withTimeout(
+        fetchJsonWithTimeout(
+          `${base}/allocate`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({ ram_size: ramSize }),
+          },
+          25000
+        ),
+        30000,
+        "/allocate request"
+      );
     } catch (e) {
       if (!isTimeoutMessage(e)) throw e;
-      if (statusMessage) {
-        statusMessage.style.color = "white";
-        statusMessage.textContent = "⏳ Allocation requested. Waiting for VM to become RUNNING and get an IP...";
-      }
+      await step("⏳ Allocation requested. Polling until RUNNING + IP...");
     }
 
     await pollVmUntilRunning(accessToken, {
       maxMinutes: 15,
       intervalMs: 5000,
       requestTimeoutMs: 90000,
-      statusPrefix: "⏳ Allocating:"
+      statusPrefix: "⏳ Allocating:",
     });
 
     if (statusMessage) {
@@ -706,86 +759,28 @@ async function allocateClickFlow() {
   }
 }
 
-// ✅ expose globally (inline + delegation always works)
-window.allocateClickFlow = allocateClickFlow;
-
 // ==================================================
-// ✅ Allocate wiring (THE FIX)
+// ✅ Allocate button binding
 // ==================================================
-function ensureAllocateWiring() {
-  if (window.location.pathname.toLowerCase() !== "/allocate") return;
-
-  const btn = document.getElementById("allocate-btn");
-  if (!btn) return;
-
-  // make sure it's actually clickable and not covered by some styling
-  btn.style.pointerEvents = "auto";
-  btn.style.position = "relative";
-  btn.style.zIndex = "9999";
-
-  // ✅ inline onclick fallback (cannot be “lost” like addEventListener)
-  if (!btn.onclick) {
-    btn.onclick = async (e) => {
-      console.log("✅ Allocate button clicked (inline onclick fallback)", { disabled: btn.disabled });
-      e?.preventDefault?.();
-      e?.stopPropagation?.();
-      if (btn.disabled) return;
-      await window.allocateClickFlow();
-    };
-  }
-
-  // ✅ normal listener too (kept)
-  bindAllocateButton();
-}
-
 function bindAllocateButton() {
   const allocateBtn = document.getElementById("allocate-btn");
-  if (!allocateBtn) return;
+  if (!allocateBtn) {
+    console.warn("bindAllocateButton: #allocate-btn not found");
+    return;
+  }
 
   if (allocateBtn.dataset.bound === "1") return;
   allocateBtn.dataset.bound = "1";
 
   allocateBtn.addEventListener("click", async (e) => {
-    console.log("✅ Allocate button clicked (direct listener)", { disabled: allocateBtn.disabled });
+    console.log("✅ Allocate button clicked", { disabled: allocateBtn.disabled });
     e.preventDefault();
     e.stopPropagation();
     if (allocateBtn.disabled) return;
-    await window.allocateClickFlow();
+    await allocateClickFlow();
   });
 
-  console.log("✅ Bound direct click handler to #allocate-btn");
-}
-
-// Document-level capture delegation fallback
-let _delegateBound = false;
-function bindAllocateDelegationFallback() {
-  if (_delegateBound) return;
-  _delegateBound = true;
-
-  document.addEventListener("click", async (e) => {
-    const t = e.target;
-    if (!(t instanceof Element)) return;
-
-    const btn = t.closest("#allocate-btn");
-    if (!btn) return;
-
-    console.log("🛟 Delegation caught click on #allocate-btn", { disabled: btn.disabled });
-    e.preventDefault();
-    e.stopPropagation();
-    if (btn.disabled) return;
-
-    await window.allocateClickFlow();
-  }, true);
-}
-
-// ✅ Watchdog: while on /allocate keep wiring alive (handles timing/DOM replacement)
-let _allocateWireTimer = null;
-function startAllocateWireWatchdog() {
-  if (_allocateWireTimer) return;
-  _allocateWireTimer = setInterval(() => {
-    if (window.location.pathname.toLowerCase() !== "/allocate") return;
-    ensureAllocateWiring();
-  }, 500);
+  console.log("✅ Bound click handler to #allocate-btn");
 }
 
 // ==================================================
@@ -794,40 +789,36 @@ function startAllocateWireWatchdog() {
 document.addEventListener("DOMContentLoaded", async () => {
   routeByPath();
 
-  bindAllocateDelegationFallback();
-  startAllocateWireWatchdog();
-
   const sb = await getSb();
   if (!sb) return;
 
   await refreshUIForSession();
 
-  ensureAllocateWiring();
+  // Ensure binding exists after routing
+  bindAllocateButton();
 
   if (window.location.pathname.toLowerCase() === "/allocate") {
     await updateAllocateGate();
     startAgentGatePolling();
-    ensureAllocateWiring();
   }
 
   sb.auth.onAuthStateChange(async () => {
     await refreshUIForSession();
-
-    ensureAllocateWiring();
-
+    bindAllocateButton();
     if (window.location.pathname.toLowerCase() === "/allocate") {
       await updateAllocateGate();
       startAgentGatePolling();
-      ensureAllocateWiring();
     }
   });
+
+  const allocateBtn = document.getElementById("allocate-btn");
+  if (allocateBtn) allocateBtn.addEventListener("click", allocateClickFlow);
 
   const retry = document.getElementById("allocate-agent-retry");
   if (retry) {
     retry.addEventListener("click", async () => {
       await updateAllocateGate();
       startAgentGatePolling();
-      ensureAllocateWiring();
     });
   }
 
@@ -848,8 +839,5 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  window.addEventListener("popstate", () => {
-    routeByPath();
-    ensureAllocateWiring();
-  });
+  window.addEventListener("popstate", () => routeByPath());
 });
