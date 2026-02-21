@@ -1,7 +1,8 @@
-// frontend/static/script.js (FULL FILE — UPDATED: delegation works even when click target is TEXT NODE)
+// frontend/static/script.js (FULL FILE — UPDATED: stopped-VM buttons bind directly + Supabase session timeout relaxed)
 // ✅ Fixes:
-//   - Resume/New buttons not working because click target can be a Text node (not Element)
-//   - Keeps single-source-of-truth event delegation for Allocate + Resume/New
+//   - Supabase getSession() timing out at 8s -> use 30s + fallback to localStorage token
+//   - Resume/Create New buttons not working -> bind direct listeners right after innerHTML injection
+//   - Keep Allocate click via event delegation
 
 console.log("✅ script.js loaded");
 
@@ -51,15 +52,10 @@ async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 30000) {
     const text = await r.text();
 
     let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { raw: text };
-    }
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
     if (!r.ok) {
-      const detail =
-        data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
+      const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
       throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     }
     return data;
@@ -71,7 +67,6 @@ async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 30000) {
   }
 }
 
-// Hard-timeout wrapper for “hanging awaits”
 async function withTimeout(promise, timeoutMs, label = "operation") {
   let t;
   const timeoutPromise = new Promise((_, reject) => {
@@ -87,7 +82,6 @@ async function withTimeout(promise, timeoutMs, label = "operation") {
   }
 }
 
-// Let UI paint before long awaits
 async function paint() {
   await new Promise((r) => setTimeout(r, 0));
 }
@@ -102,7 +96,6 @@ async function isAgentOnline() {
   }
 }
 
-// Clipboard copy that always gives user a way to copy
 async function copyTextReliable(text) {
   try {
     if (navigator.clipboard && window.isSecureContext) {
@@ -170,14 +163,12 @@ function setAllocateBusy(isBusy, msg = "") {
 async function updateAllocateGate() {
   const ok = await isAgentOnline();
   if (ok) setGateStatus(true, "✅ Local Agent is running. Click Allocate to continue.");
-  else
-    setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
+  else setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
 
   const allocateBtn = document.getElementById("allocate-btn");
   if (allocateBtn) allocateBtn.style.display = "inline-block";
 }
 
-// ✅ Poll agent for a short period (helps on refresh/slow startup)
 let _agentPollTimer = null;
 function startAgentGatePolling() {
   if (_agentPollTimer) return;
@@ -188,11 +179,7 @@ function startAgentGatePolling() {
     const allocateBtn = document.getElementById("allocate-btn");
 
     if (ok) {
-      if (
-        allocateBtn &&
-        allocateBtn.disabled &&
-        document.getElementById("loading-text")?.style.display !== "block"
-      ) {
+      if (allocateBtn && allocateBtn.disabled && document.getElementById("loading-text")?.style.display !== "block") {
         setGateStatus(true, "✅ Local Agent is running. Click Allocate to continue.");
       }
       clearInterval(_agentPollTimer);
@@ -208,18 +195,18 @@ function buildInstallCommand() {
   return [
     '$ErrorActionPreference="Stop"',
     '$dest="C:\\CloudRAMS\\LocalAgent"',
-    "New-Item -ItemType Directory -Force -Path $dest | Out-Null",
+    'New-Item -ItemType Directory -Force -Path $dest | Out-Null',
     'Write-Host "Downloading LocalAgent zip..."',
     `Invoke-WebRequest -Uri "${AGENT_ZIP_URL}" -OutFile "$env:TEMP\\LocalAgent.zip"`,
     'Write-Host "Extracting..."',
     'Expand-Archive -Path "$env:TEMP\\LocalAgent.zip" -DestinationPath $dest -Force',
-    "$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1",
+    '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
     'if (-not $root) { throw "Could not find extracted folder inside destination." }',
-    "Set-Location $root.FullName",
+    'Set-Location $root.FullName',
     'Write-Host "Creating venv..."',
-    "python -m venv .venv",
+    'python -m venv .venv',
     'Write-Host "Installing requirements..."',
-    ".\\.venv\\Scripts\\pip.exe install -r requirements.txt",
+    '.\\.venv\\Scripts\\pip.exe install -r requirements.txt',
     'Write-Host "✅ Install complete. Next: run the agent."',
   ].join(" ; ");
 }
@@ -228,10 +215,10 @@ function buildRunCommand() {
   return [
     '$ErrorActionPreference="Stop"',
     '$dest="C:\\CloudRAMS\\LocalAgent"',
-    "$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1",
+    '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
     'if (-not $root) { throw "Agent folder not found. Run install first." }',
-    "Set-Location $root.FullName",
-    ".\\.venv\\Scripts\\python.exe agent_main.py",
+    'Set-Location $root.FullName',
+    '.\\.venv\\Scripts\\python.exe agent_main.py',
   ].join(" ; ");
 }
 
@@ -254,19 +241,14 @@ function navigate(page, pushState = true) {
   if (target) target.style.display = "block";
 
   const nav = document.getElementById("nav");
-  if (nav) nav.style.display = page === "login" || page === "register" ? "none" : "block";
+  if (nav) nav.style.display = (page === "login" || page === "register") ? "none" : "block";
 
   if (pushState) {
     const newPath =
-      page === "login"
-        ? "/login"
-        : page === "register"
-        ? "/register"
-        : page === "home"
-        ? "/"
-        : page === "allocate"
-        ? "/allocate"
-        : "/";
+      page === "login" ? "/login" :
+      page === "register" ? "/register" :
+      page === "home" ? "/" :
+      page === "allocate" ? "/allocate" : "/";
     window.history.pushState({}, "", newPath);
   }
 
@@ -433,13 +415,15 @@ window.logout = logout;
 // ==================================================
 // ✅ VM polling (timeout-tolerant)
 // ==================================================
-async function pollVmUntilRunning(
-  accessToken,
-  { maxMinutes = 15, intervalMs = 5000, requestTimeoutMs = 90000, statusPrefix = "⏳" } = {}
-) {
+async function pollVmUntilRunning(accessToken, {
+  maxMinutes = 15,
+  intervalMs = 5000,
+  requestTimeoutMs = 90000,
+  statusPrefix = "⏳"
+} = {}) {
   const base = await apiBase();
   const url = `${base}/my_vm`;
-  const headers = { Authorization: `Bearer ${accessToken}` };
+  const headers = { "Authorization": `Bearer ${accessToken}` };
 
   const endAt = Date.now() + maxMinutes * 60 * 1000;
   let attempt = 0;
@@ -482,7 +466,7 @@ async function pollVmUntilRunning(
 }
 
 // ==================================================
-// ✅ Existing VM UI (stopped)
+// ✅ Existing VM UI (stopped) + DIRECT BUTTON BINDING
 // ==================================================
 function renderStoppedVmChoices(vmInfo, accessToken) {
   const statusMessage = document.getElementById("status-message");
@@ -512,37 +496,93 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
     </div>
   `;
 
-  // store context for delegated handlers
-  window.__stoppedVmInfo = { vm_id: vmInfo.vm_id, accessToken };
-}
+  const resumeBtn = document.getElementById("resume-vm-btn");
+  const newBtn = document.getElementById("new-vm-btn");
 
-// ==================================================
-// ✅ API helpers for stopped VM actions
-// ==================================================
-async function startVm(accessToken, vm_id) {
-  const base = await apiBase();
-  return await fetchJsonWithTimeout(
-    `${base}/start_vm`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ vm_id }),
-    },
-    25000
-  );
-}
+  if (resumeBtn) {
+    resumeBtn.onclick = async () => {
+      const sm = document.getElementById("status-message");
+      try {
+        setAllocateBusy(true, "Requesting resume (this can take several minutes)...");
+        if (sm) {
+          sm.style.color = "white";
+          sm.textContent = "⏳ Resume requested. Waiting for VM to become RUNNING and get an IP...";
+        }
 
-async function terminateVm(accessToken, vm_id) {
-  const base = await apiBase();
-  return await fetchJsonWithTimeout(
-    `${base}/terminate_vm`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ vm_id }),
-    },
-    90000
-  );
+        const base = await apiBase();
+
+        // request resume (timeout is okay)
+        try {
+          await fetchJsonWithTimeout(`${base}/start_vm`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({ vm_id: vmInfo.vm_id }),
+          }, 25000);
+        } catch (e) {
+          if (!isTimeoutMessage(e)) throw e;
+        }
+
+        await pollVmUntilRunning(accessToken, {
+          maxMinutes: 15,
+          intervalMs: 5000,
+          requestTimeoutMs: 90000,
+          statusPrefix: "⏳ Resuming:",
+        });
+
+        window.location.href = "/status";
+      } catch (e) {
+        if (sm) {
+          sm.style.color = "crimson";
+          sm.textContent = `❌ Resume failed: ${e.message || e}`;
+        }
+      } finally {
+        setAllocateBusy(false);
+        await updateAllocateGate();
+      }
+    };
+  }
+
+  if (newBtn) {
+    newBtn.onclick = async () => {
+      const ok = confirm(
+        "Creating a new instance will TERMINATE your old instance and ALL data on it will be lost permanently. Continue?"
+      );
+      if (!ok) return;
+
+      const sm = document.getElementById("status-message");
+      try {
+        setAllocateBusy(true, "Terminating old VM...");
+
+        const base = await apiBase();
+        await fetchJsonWithTimeout(`${base}/terminate_vm`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
+        }, 90000);
+
+        if (allocateBtn) allocateBtn.style.display = "inline-block";
+
+        if (sm) {
+          sm.style.color = "lightgreen";
+          sm.textContent = "✅ Old VM terminated. Click Allocate again to create a new instance.";
+        }
+      } catch (e) {
+        if (sm) {
+          sm.style.color = "crimson";
+          sm.textContent = `❌ Could not terminate old VM: ${e.message || e}`;
+        }
+      } finally {
+        setAllocateBusy(false);
+        await updateAllocateGate();
+      }
+    };
+  }
 }
 
 // ==================================================
@@ -550,11 +590,9 @@ async function terminateVm(accessToken, vm_id) {
 // ==================================================
 async function getMyVmInfo(accessToken) {
   const base = await apiBase();
-  return await fetchJsonWithTimeout(
-    `${base}/my_vm`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
-    90000
-  );
+  return await fetchJsonWithTimeout(`${base}/my_vm`, {
+    headers: { "Authorization": `Bearer ${accessToken}` }
+  }, 90000);
 }
 
 let _allocateInFlight = false;
@@ -592,12 +630,21 @@ async function allocateClickFlow() {
     }
 
     await step("🔐 Preparing Supabase client...");
-    const sb = await withTimeout(getSb(), 8000, "Supabase init");
+    const sb = await withTimeout(getSb(), 12000, "Supabase init");
     if (!sb) throw new Error("Supabase not initialized.");
 
+    // ✅ BIG FIX: don’t hard-fail at 8s; try 30s, then fallback to localStorage
     await step("🔑 Reading Supabase session...");
-    const { data: { session } } = await withTimeout(sb.auth.getSession(), 8000, "Supabase getSession()");
-    let accessToken = session?.access_token || localStorage.getItem("sb_access_token") || "";
+    let accessToken = localStorage.getItem("sb_access_token") || "";
+
+    try {
+      const sessResp = await withTimeout(sb.auth.getSession(), 30000, "Supabase getSession()");
+      const session = sessResp?.data?.session;
+      if (session?.access_token) accessToken = session.access_token;
+    } catch (e) {
+      console.warn("Supabase getSession failed/timed out. Using localStorage token if available.", e);
+    }
+
     if (!accessToken) {
       await step("⚠️ No session token found. Redirecting to login...");
       navigate("login");
@@ -643,19 +690,14 @@ async function allocateClickFlow() {
     const base = await apiBase();
 
     try {
-      await withTimeout(
-        fetchJsonWithTimeout(
-          `${base}/allocate`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-            body: JSON.stringify({ ram_size: ramSize }),
-          },
-          25000
-        ),
-        30000,
-        "/allocate request"
-      );
+      await fetchJsonWithTimeout(`${base}/allocate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ ram_size: ramSize }),
+      }, 25000);
     } catch (e) {
       if (!isTimeoutMessage(e)) throw e;
       await step("⏳ Allocation requested. Polling until RUNNING + IP...");
@@ -688,123 +730,31 @@ async function allocateClickFlow() {
 }
 
 // ==================================================
-// ✅ CLICK HANDLING (SINGLE SOURCE OF TRUTH)
-// ✅ FIX: normalize target (TEXT_NODE -> parentElement)
+// ✅ Allocate click handling (delegation only for Allocate)
 // ==================================================
-let _delegationBound = false;
+let _allocDelegationBound = false;
 function bindAllocateDelegation() {
-  if (_delegationBound) return;
-  _delegationBound = true;
+  if (_allocDelegationBound) return;
+  _allocDelegationBound = true;
 
-  document.addEventListener(
-    "click",
-    async (e) => {
-      let el = e.target;
+  document.addEventListener("click", async (e) => {
+    let el = e.target;
+    if (el && el.nodeType === 3) el = el.parentElement;
+    if (!(el instanceof Element)) return;
 
-      // ✅ Critical fix: if target is a text node, go to its parent element
-      if (el && el.nodeType === 3) el = el.parentElement; // Node.TEXT_NODE === 3
-      if (!(el instanceof Element)) return;
+    const alloc = el.closest("#allocate-btn");
+    if (!alloc) return;
 
-      // Allocate
-      const alloc = el.closest("#allocate-btn");
-      if (alloc) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (alloc.disabled) return;
-        console.log("✅ Allocate clicked (delegation)");
-        await allocateClickFlow();
-        return;
-      }
+    e.preventDefault();
+    e.stopPropagation();
 
-      // Resume stopped instance
-      const resume = el.closest("#resume-vm-btn");
-      if (resume) {
-        e.preventDefault();
-        e.stopPropagation();
-        console.log("✅ Resume clicked (delegation)");
+    if (alloc.disabled) return;
 
-        const sm = document.getElementById("status-message");
-        try {
-          const info = window.__stoppedVmInfo;
-          if (!info?.vm_id || !info?.accessToken) throw new Error("Missing stopped VM context.");
+    console.log("✅ Allocate clicked");
+    await allocateClickFlow();
+  }, true);
 
-          setAllocateBusy(true, "Requesting resume (this can take several minutes)...");
-          if (sm) {
-            sm.style.color = "white";
-            sm.textContent = "⏳ Resume requested. Waiting for VM to become RUNNING and get an IP...";
-          }
-
-          try {
-            await startVm(info.accessToken, info.vm_id);
-          } catch (err) {
-            if (!isTimeoutMessage(err)) throw err;
-          }
-
-          await pollVmUntilRunning(info.accessToken, {
-            maxMinutes: 15,
-            intervalMs: 5000,
-            requestTimeoutMs: 90000,
-            statusPrefix: "⏳ Resuming:",
-          });
-
-          window.location.href = "/status";
-        } catch (err) {
-          console.error("Resume failed:", err);
-          if (sm) {
-            sm.style.color = "crimson";
-            sm.textContent = `❌ Resume failed: ${err.message || err}`;
-          }
-        } finally {
-          setAllocateBusy(false);
-          await updateAllocateGate();
-        }
-        return;
-      }
-
-      // Create new instance (terminate old)
-      const createNew = el.closest("#new-vm-btn");
-      if (createNew) {
-        e.preventDefault();
-        e.stopPropagation();
-        console.log("✅ Create new clicked (delegation)");
-
-        const ok = confirm(
-          "Creating a new instance will TERMINATE your old instance and ALL data on it will be lost permanently. Continue?"
-        );
-        if (!ok) return;
-
-        const sm = document.getElementById("status-message");
-        try {
-          const info = window.__stoppedVmInfo;
-          if (!info?.vm_id || !info?.accessToken) throw new Error("Missing stopped VM context.");
-
-          setAllocateBusy(true, "Terminating old VM...");
-          await terminateVm(info.accessToken, info.vm_id);
-
-          const allocateBtn = document.getElementById("allocate-btn");
-          if (allocateBtn) allocateBtn.style.display = "inline-block";
-
-          if (sm) {
-            sm.style.color = "lightgreen";
-            sm.textContent = "✅ Old VM terminated. Click Allocate again to create a new instance.";
-          }
-        } catch (err) {
-          console.error("Terminate failed:", err);
-          if (sm) {
-            sm.style.color = "crimson";
-            sm.textContent = `❌ Could not terminate old VM: ${err.message || err}`;
-          }
-        } finally {
-          setAllocateBusy(false);
-          await updateAllocateGate();
-        }
-        return;
-      }
-    },
-    true
-  );
-
-  console.log("✅ Delegation click handlers bound (allocate + resume/new)");
+  console.log("✅ Allocate delegation bound");
 }
 
 // ==================================================
@@ -831,6 +781,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       startAgentGatePolling();
     }
   });
+
+  const allocateBtn = document.getElementById("allocate-btn");
+  if (allocateBtn) {
+    // keep disabled logic from gate
+  }
 
   const retry = document.getElementById("allocate-agent-retry");
   if (retry) {
