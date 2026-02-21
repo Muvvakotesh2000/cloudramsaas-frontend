@@ -3,10 +3,14 @@
 <head>
   <title>Cloud RAM Dashboard</title>
 
-  <!-- Supabase + auth helper -->
+  <!-- Supabase -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <!-- App config -->
   <script src="/static/config.js" defer></script>
-  <script src="/static/status_auth.js?v=7" defer></script>
+
+  <!-- KEEP this if you want, but status.html will no longer depend on it -->
+  <script src="/static/status_auth.js?v=8" defer></script>
 
   <style>
     body {
@@ -61,8 +65,6 @@
       margin-top: 12px;
     }
     .muted { opacity: 0.9; font-size: 13px; }
-    .ok { color: lightgreen; }
-    .bad { color: #ffb3b3; }
     code {
       background: rgba(0,0,0,0.25);
       padding: 2px 6px;
@@ -73,21 +75,20 @@
 
 <body>
   <h1>Cloud RAM Dashboard</h1>
-
   <div id="status-text">Loading...</div>
 
-  <!-- NEW: Stopped VM actions -->
+  <!-- STOPPED VM ACTIONS -->
   <div id="stopped-actions" class="panel" style="display:none;">
     <div style="font-weight:bold; margin-bottom:8px;">VM Actions</div>
-    <div class="muted" id="stopped-hint" style="margin-bottom:10px;"></div>
+    <div id="stopped-hint" class="muted" style="margin-bottom:10px;"></div>
 
-    <div style="display:flex; gap:10px; flex-wrap:wrap;">
-      <button class="button" id="resume-vm-btn" type="button">Resume VM</button>
-      <button class="button danger" id="new-vm-btn" type="button">Create New VM (Terminate old)</button>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+      <button class="button" id="resume-vm-btn" type="button" disabled>Resume VM</button>
+      <button class="button danger" id="new-vm-btn" type="button" disabled>Create New VM (Terminate old)</button>
       <span id="stopped-spinner" style="display:none;" class="spinner"></span>
     </div>
 
-    <p id="stopped-status" style="margin-top: 10px; font-weight: bold;"></p>
+    <p id="stopped-status" style="margin-top:10px; font-weight:bold;"></p>
   </div>
 
   <div style="margin-top:12px;">
@@ -128,7 +129,11 @@
 
   const AGENT_BASE = "http://127.0.0.1:7071";
 
-  // ========= Helpers =========
+  // =========================
+  // ✅ Utilities
+  // =========================
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
   async function apiBase() {
     const cfg = await window.loadAppConfig();
     return (cfg.API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
@@ -137,10 +142,8 @@
   async function fetchJson(url, opts = {}) {
     const r = await fetch(url, opts);
     const text = await r.text();
-
     let data;
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
     if (!r.ok) {
       const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
       throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
@@ -157,42 +160,108 @@
     }
   }
 
-  async function getAccessToken() {
-    if (window.getAuthHeaders) {
-      const h = await window.getAuthHeaders();
-      const auth = h.Authorization || h.authorization || "";
-      return auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
+  // =========================
+  // ✅ Supabase bootstrap (fixes the timeout flakiness)
+  // =========================
+  let _sb = null;
+  let _authReady = false;
+
+  async function ensureSupabaseClient() {
+    if (_sb) return _sb;
+    const cfg = await window.loadAppConfig();
+    if (!window.supabase?.createClient) throw new Error("Supabase SDK not loaded.");
+    _sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+    // expose for other scripts if needed
+    window._sbClient = _sb;
+    return _sb;
+  }
+
+  async function withTimeout(promise, ms, msg) {
+    let t;
+    const timeout = new Promise((_, rej) => {
+      t = setTimeout(() => rej(new Error(msg || `Timed out after ${ms}ms`)), ms);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      clearTimeout(t);
     }
-    return localStorage.getItem("sb_access_token") || "";
   }
 
-  async function getUserId() {
-    const sb = window._sbClient;
-    if (!sb) throw new Error("Supabase client not initialized.");
-    const { data: { user } } = await sb.auth.getUser();
-    const user_id = user?.id;
-    if (!user_id) throw new Error("Could not determine user_id.");
-    return user_id;
+  async function getAccessTokenResilient() {
+    // 1) try session (with retries + timeout)
+    try {
+      const sb = await ensureSupabaseClient();
+      for (let i = 1; i <= 5; i++) {
+        try {
+          const { data } = await withTimeout(sb.auth.getSession(), 12000, "Supabase getSession() timed out after 12s");
+          const token = data?.session?.access_token;
+          if (token) {
+            localStorage.setItem("sb_access_token", token);
+            return token;
+          }
+        } catch (e) {
+          // retry
+          await sleep(600 * i);
+        }
+      }
+    } catch {}
+
+    // 2) fallback localStorage
+    const ls = localStorage.getItem("sb_access_token");
+    if (ls) return ls;
+
+    return "";
   }
 
-  function showStoppedActions(show, hintText = "") {
+  async function getAuthHeadersResilient() {
+    const token = await getAccessTokenResilient();
+    if (!token) throw new Error("Not authenticated (missing access token). Please go to Login again.");
+    return { Authorization: `Bearer ${token}` };
+  }
+
+  async function initAuthGate() {
+    const stoppedHint = document.getElementById("stopped-hint");
+    const resumeBtn = document.getElementById("resume-vm-btn");
+    const newBtn = document.getElementById("new-vm-btn");
+
+    try {
+      if (stoppedHint) stoppedHint.textContent = "Checking login session...";
+      await ensureSupabaseClient();
+      const token = await getAccessTokenResilient();
+      _authReady = !!token;
+
+      if (_authReady) {
+        if (stoppedHint) stoppedHint.textContent = `Auth ready. VM ID: ${vmId || "unknown"}`;
+        if (resumeBtn) resumeBtn.disabled = false;
+        if (newBtn) newBtn.disabled = false;
+      } else {
+        if (stoppedHint) stoppedHint.textContent = "Auth NOT ready. Please logout/login again.";
+        if (resumeBtn) resumeBtn.disabled = true;
+        if (newBtn) newBtn.disabled = true;
+      }
+    } catch (e) {
+      _authReady = false;
+      if (stoppedHint) stoppedHint.textContent = `Auth error: ${e.message || e}`;
+      if (resumeBtn) resumeBtn.disabled = true;
+      if (newBtn) newBtn.disabled = true;
+    }
+  }
+
+  // =========================
+  // ✅ VM helpers
+  // =========================
+  function showStoppedActions(show) {
     const panel = document.getElementById("stopped-actions");
-    const hint = document.getElementById("stopped-hint");
-    if (!panel) return;
-    panel.style.display = show ? "block" : "none";
-    if (hint) hint.textContent = hintText || "";
+    if (panel) panel.style.display = show ? "block" : "none";
   }
 
-  // ---------------------------
-  // ✅ ALWAYS refresh VM from backend (/my_vm)
-  // ---------------------------
   async function fetchMyVmWithRetries(maxTries = 30, delayMs = 5000) {
-    const headers = await window.getAuthHeaders();
+    const headers = await getAuthHeadersResilient();
     const base = await apiBase();
 
     for (let i = 1; i <= maxTries; i++) {
       const resp = await fetch(`${base}/my_vm`, { headers, cache: "no-store" });
-
       const text = await resp.text();
       let info;
       try { info = JSON.parse(text); } catch { info = { raw: text }; }
@@ -206,7 +275,7 @@
       if ((info.state === "running" || info.state === "pending") && !info.ip) {
         document.getElementById("status-text").innerHTML =
           `⏳ VM is ${info.state}. Waiting for public IP... (try ${i}/${maxTries})`;
-        await new Promise(r => setTimeout(r, delayMs));
+        await sleep(delayMs);
         continue;
       }
 
@@ -216,32 +285,30 @@
     throw new Error("Timed out waiting for VM IP. Try again in a minute.");
   }
 
-  async function pollUntilRunning(vm_id, maxTries = 60, delayMs = 5000) {
+  async function pollUntilRunning(maxTries = 60, delayMs = 5000) {
     for (let i = 1; i <= maxTries; i++) {
       const info = await fetchMyVmWithRetries(1, 0);
       if (!info.exists) throw new Error("VM not found anymore.");
-      if (info.vm_id && info.vm_id !== vm_id) {
-        // if backend created a new vm, accept it
-        vm_id = info.vm_id;
-      }
       if (info.state === "running" && info.ip) return info;
       document.getElementById("status-text").innerHTML =
         `⏳ Waiting for VM to become RUNNING and get IP... (try ${i}/${maxTries})`;
-      await new Promise(r => setTimeout(r, delayMs));
+      await sleep(delayMs);
     }
     throw new Error("Timed out waiting for VM to become RUNNING.");
   }
 
-  // ========= Dashboard init =========
+  // =========================
+  // ✅ Dashboard init
+  // =========================
   document.addEventListener("DOMContentLoaded", async () => {
+    // Bind buttons immediately (so clicks always show errors instead of doing nothing)
     document.getElementById("stop-vm-btn")?.addEventListener("click", stopVmNow);
+    document.getElementById("resume-vm-btn")?.addEventListener("click", resumeVmNow);
+    document.getElementById("new-vm-btn")?.addEventListener("click", terminateVmNow);
+
     document.getElementById("migrate-btn")?.addEventListener("click", migrateSelectedTasks);
     document.getElementById("migrate-vscode-btn")?.addEventListener("click", migrateVSCodeProject);
     document.getElementById("save-local-btn")?.addEventListener("click", saveProjectToLocal);
-
-    // NEW stopped actions
-    document.getElementById("resume-vm-btn")?.addEventListener("click", resumeVmNow);
-    document.getElementById("new-vm-btn")?.addEventListener("click", terminateAndCreateNewHint);
 
     await initDashboard();
   });
@@ -250,6 +317,9 @@
     try {
       showStoppedActions(false);
       document.getElementById("status-text").innerHTML = "⏳ Loading VM info...";
+
+      // ensure auth once
+      await initAuthGate();
 
       const info = await fetchMyVmWithRetries(36, 5000);
 
@@ -265,10 +335,13 @@
       if (vmId) localStorage.setItem("vm_id", vmId);
       if (vmIp) localStorage.setItem("vm_ip", vmIp);
 
+      // update hint now that vmId is known
+      await initAuthGate();
+
       if (info.state === "stopped" || info.state === "stopping") {
         document.getElementById("status-text").innerHTML =
-          `🟡 VM is <b>${info.state}</b>. You can resume it here or create a new one.`;
-        showStoppedActions(true, `VM ID: ${vmId || "unknown"}`);
+          `🟡 VM is <b>${info.state}</b>. You can resume it here or terminate it.`;
+        showStoppedActions(true);
         return;
       }
 
@@ -278,13 +351,9 @@
         return;
       }
 
-      // VNC link (new tab)
       loadVncGui();
-
-      // RAM usage
       await fetchRamUsage();
 
-      // Tasks
       const agentOk = await isAgentOnline();
       if (!agentOk) {
         const loadingText = document.getElementById("task-loading");
@@ -301,7 +370,7 @@
   }
 
   async function fetchRamUsage() {
-    const headers = await window.getAuthHeaders();
+    const headers = await getAuthHeadersResilient();
     const base = await apiBase();
 
     const response = await fetch(`${base}/ram_usage?vm_ip=${encodeURIComponent(vmIp)}`, { headers });
@@ -319,9 +388,9 @@
     `;
   }
 
-  // ---------------------------
-  // ✅ Stop VM via backend
-  // ---------------------------
+  // =========================
+  // ✅ Actions: stop/resume/terminate
+  // =========================
   async function stopVmNow() {
     const stopBtn = document.getElementById("stop-vm-btn");
     const spinner = document.getElementById("stop-spinner");
@@ -333,28 +402,20 @@
       spinner.style.display = "inline-block";
       stopBtn.disabled = true;
 
-      const headers = await window.getAuthHeaders();
+      const headers = await getAuthHeadersResilient();
       const vm_id = localStorage.getItem("vm_id");
       if (!vm_id) throw new Error("No vm_id found in localStorage.");
 
       const base = await apiBase();
-      const resp = await fetch(`${base}/stop_vm`, {
+      await fetchJson(`${base}/stop_vm`, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({ vm_id })
       });
 
-      const text = await resp.text();
-      let data;
-      try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
-      if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "Stop failed.");
-
       statusEl.style.color = "lightgreen";
       statusEl.textContent = "✅ Stop requested. VM will enter STOPPED state shortly.";
-
-      // refresh view
-      await new Promise(r => setTimeout(r, 2000));
+      await sleep(2000);
       await initDashboard();
     } catch (e) {
       statusEl.style.color = "crimson";
@@ -365,9 +426,6 @@
     }
   }
 
-  // ---------------------------
-  // ✅ Resume VM (NEW)
-  // ---------------------------
   async function resumeVmNow() {
     const btn = document.getElementById("resume-vm-btn");
     const spinner = document.getElementById("stopped-spinner");
@@ -379,7 +437,7 @@
       spinner.style.display = "inline-block";
       btn.disabled = true;
 
-      const headers = await window.getAuthHeaders();
+      const headers = await getAuthHeadersResilient();
       const vm_id = localStorage.getItem("vm_id");
       if (!vm_id) throw new Error("No vm_id found in localStorage.");
 
@@ -393,14 +451,13 @@
       statusEl.style.color = "lightgreen";
       statusEl.textContent = "✅ Resume requested. Waiting for VM to become RUNNING...";
 
-      const info = await pollUntilRunning(vm_id, 60, 5000);
+      const info = await pollUntilRunning(60, 5000);
       vmIp = info.ip;
       localStorage.setItem("vm_ip", vmIp);
 
       statusEl.style.color = "lightgreen";
-      statusEl.textContent = `✅ VM is RUNNING (${vmIp}). Reloading dashboard...`;
-
-      await new Promise(r => setTimeout(r, 800));
+      statusEl.textContent = `✅ VM is RUNNING (${vmIp}). Reloading...`;
+      await sleep(800);
       await initDashboard();
     } catch (e) {
       statusEl.style.color = "crimson";
@@ -411,15 +468,12 @@
     }
   }
 
-  // ---------------------------
-  // ✅ Terminate VM (NEW)
-  // ---------------------------
-  async function terminateAndCreateNewHint() {
+  async function terminateVmNow() {
     const btn = document.getElementById("new-vm-btn");
     const spinner = document.getElementById("stopped-spinner");
     const statusEl = document.getElementById("stopped-status");
 
-    const ok = confirm("This will TERMINATE your existing VM and ALL data will be lost. Continue?");
+    const ok = confirm("This will TERMINATE your VM and ALL data will be lost. Continue?");
     if (!ok) return;
 
     try {
@@ -428,7 +482,7 @@
       spinner.style.display = "inline-block";
       btn.disabled = true;
 
-      const headers = await window.getAuthHeaders();
+      const headers = await getAuthHeadersResilient();
       const vm_id = localStorage.getItem("vm_id");
       if (!vm_id) throw new Error("No vm_id found in localStorage.");
 
@@ -443,7 +497,7 @@
       localStorage.removeItem("vm_ip");
 
       statusEl.style.color = "lightgreen";
-      statusEl.textContent = "✅ VM terminated. Go to Allocate page to create a new instance.";
+      statusEl.textContent = "✅ VM terminated. Go to Allocate page to create a new one.";
     } catch (e) {
       statusEl.style.color = "crimson";
       statusEl.textContent = `❌ ${e.message || e}`;
@@ -453,9 +507,9 @@
     }
   }
 
-  // ---------------------------
-  // ✅ Tasks list via Local Agent
-  // ---------------------------
+  // =========================
+  // ✅ Tasks via Agent
+  // =========================
   async function fetchLocalTasksViaAgent() {
     const taskList = document.getElementById("tasks");
     const loadingText = document.getElementById("task-loading");
@@ -514,9 +568,6 @@
     });
   }
 
-  // ---------------------------
-  // ✅ Migrate Selected Tasks via Local Agent
-  // ---------------------------
   async function migrateSelectedTasks() {
     const migrateBtn = document.getElementById("migrate-btn");
     const spinner = document.getElementById("migration-spinner");
@@ -545,10 +596,15 @@
 
       const task_names = selectedOptions.map(opt => opt.text.split(" (PID:")[0].trim());
 
-      const access_token = await getAccessToken();
+      const access_token = await getAccessTokenResilient();
       if (!access_token) throw new Error("Missing Supabase access token.");
 
-      const user_id = await getUserId();
+      const user_id = await (async () => {
+        const sb = await ensureSupabaseClient();
+        const { data: { user } } = await sb.auth.getUser();
+        if (!user?.id) throw new Error("Could not determine user_id.");
+        return user.id;
+      })();
 
       const result = await fetchJson(`${AGENT_BASE}/migrate_tasks`, {
         method: "POST",
@@ -590,10 +646,15 @@
       vmIp = info.ip;
       localStorage.setItem("vm_ip", vmIp);
 
-      const access_token = await getAccessToken();
+      const access_token = await getAccessTokenResilient();
       if (!access_token) throw new Error("Missing Supabase access token.");
 
-      const user_id = await getUserId();
+      const user_id = await (async () => {
+        const sb = await ensureSupabaseClient();
+        const { data: { user } } = await sb.auth.getUser();
+        if (!user?.id) throw new Error("Could not determine user_id.");
+        return user.id;
+      })();
 
       const data = await fetchJson(`${AGENT_BASE}/migrate_vscode`, {
         method: "POST",
@@ -633,10 +694,15 @@
       if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
       vmIp = info.ip;
 
-      const access_token = await getAccessToken();
+      const access_token = await getAccessTokenResilient();
       if (!access_token) throw new Error("Missing Supabase access token.");
 
-      const user_id = await getUserId();
+      const user_id = await (async () => {
+        const sb = await ensureSupabaseClient();
+        const { data: { user } } = await sb.auth.getUser();
+        if (!user?.id) throw new Error("Could not determine user_id.");
+        return user.id;
+      })();
 
       const resp = await fetchJson(`${AGENT_BASE}/save_project_to_local`, {
         method: "POST",
@@ -655,9 +721,9 @@
     }
   }
 
-  // ---------------------------
+  // =========================
   // ✅ VNC link
-  // ---------------------------
+  // =========================
   function loadVncGui() {
     const loading = document.getElementById("vnc-loading");
     const link = document.getElementById("vnc-link");
