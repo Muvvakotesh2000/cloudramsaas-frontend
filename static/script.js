@@ -1,10 +1,10 @@
-// frontend/static/script.js (FULL FILE — UPDATED: allocate click binding is bulletproof + no double-run)
-// ✅ Fixes: Allocate button enabled but sometimes click does nothing
-// ✅ Improvements over your current file:
-//   - Expose allocateClickFlow globally (window.allocateClickFlow) so inline/delegation always works
-//   - Add an in-flight lock so delegation + direct handler can’t trigger twice
-//   - Re-bind if the DOM node was replaced (dataset guard resets when node changes)
-//   - Add very clear logs to confirm which handler fired
+// frontend/static/script.js (FULL FILE — UPDATED: allocate wiring cannot be lost)
+// ✅ Fixes: Allocate button enabled but sometimes click does nothing until refresh
+// ✅ Strategy (strongest possible):
+//   1) Direct addEventListener binding (normal)
+//   2) Document capture delegation fallback
+//   3) Inline onclick fallback (btn.onclick = ...) so even if listeners drop, click still works
+//   4) Re-wire watchdog while on /allocate (handles DOM replacement/timing)
 // ✅ Keeps your timeout-tolerant /my_vm polling behavior and STOPPED VM UI
 
 console.log("✅ script.js loaded");
@@ -151,6 +151,9 @@ async function updateAllocateGate() {
 
   const allocateBtn = document.getElementById("allocate-btn");
   if (allocateBtn) allocateBtn.style.display = "inline-block";
+
+  // ✅ ensure wiring whenever gate updates (common moment where user clicks)
+  ensureAllocateWiring();
 }
 
 // ✅ Poll agent for a short period (helps on refresh/slow startup)
@@ -170,6 +173,9 @@ function startAgentGatePolling() {
       clearInterval(_agentPollTimer);
       _agentPollTimer = null;
     }
+
+    // ✅ keep wiring alive while we poll
+    ensureAllocateWiring();
   }, 1200);
 }
 
@@ -238,9 +244,10 @@ function navigate(page, pushState = true) {
   }
 
   if (page === "allocate") {
-    // ✅ IMPORTANT: bind allocate click whenever allocate page is shown
     setTimeout(async () => {
-      bindAllocateButton();             // ✅ ensure direct handler exists
+      // ✅ make sure button always wired when showing allocate page
+      ensureAllocateWiring();
+
       await updateAllocateGate();
       startAgentGatePolling();
 
@@ -302,6 +309,9 @@ async function refreshUIForSession() {
 
   const userEmailEl = document.getElementById("user-email");
   if (userEmailEl) userEmailEl.textContent = `Logged in as: ${session.user.email}`;
+
+  // ✅ after routing, ensure wiring
+  ensureAllocateWiring();
 }
 
 // ==================================================
@@ -363,6 +373,8 @@ async function login() {
     const path = window.location.pathname.toLowerCase();
     if (path === "/allocate") navigate("allocate");
     else navigate("home");
+
+    ensureAllocateWiring();
   } catch (e) {
     if (errorEl) errorEl.textContent = "Unexpected login error. Check console.";
   }
@@ -405,7 +417,7 @@ window.logout = logout;
 async function pollVmUntilRunning(accessToken, {
   maxMinutes = 15,
   intervalMs = 5000,
-  requestTimeoutMs = 90000, // ✅ per-request timeout
+  requestTimeoutMs = 90000,
   statusPrefix = "⏳"
 } = {}) {
   const base = await apiBase();
@@ -422,7 +434,6 @@ async function pollVmUntilRunning(accessToken, {
     try {
       info = await fetchJsonWithTimeout(url, { headers }, requestTimeoutMs);
     } catch (e) {
-      // ✅ IMPORTANT: tolerate timeouts during polling
       if (isTimeoutMessage(e)) {
         const sm = document.getElementById("status-message");
         if (sm) {
@@ -432,7 +443,7 @@ async function pollVmUntilRunning(accessToken, {
         await sleep(intervalMs);
         continue;
       }
-      throw e; // real error (401, 500, etc.)
+      throw e;
     }
 
     if (info?.vm_id) localStorage.setItem("vm_id", info.vm_id);
@@ -445,7 +456,6 @@ async function pollVmUntilRunning(accessToken, {
     }
 
     if (!info.exists) throw new Error("No VM found while waiting. Please click Allocate again.");
-
     if (info.state === "running" && info.ip) return info;
 
     await sleep(intervalMs);
@@ -493,7 +503,6 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
 
         const base = await apiBase();
 
-        // Short timeout request, not fatal if it times out
         try {
           await fetchJsonWithTimeout(`${base}/start_vm`, {
             method: "POST",
@@ -505,7 +514,6 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
           }, 25000);
         } catch (e) {
           if (!isTimeoutMessage(e)) throw e;
-          // If timed out, still proceed to poll
           const sm = document.getElementById("status-message");
           if (sm) {
             sm.style.color = "white";
@@ -513,7 +521,6 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
           }
         }
 
-        // Poll until running + IP
         await pollVmUntilRunning(accessToken, {
           maxMinutes: 15,
           intervalMs: 5000,
@@ -577,10 +584,10 @@ async function getMyVmInfo(accessToken) {
   const base = await apiBase();
   return await fetchJsonWithTimeout(`${base}/my_vm`, {
     headers: { "Authorization": `Bearer ${accessToken}` }
-  }, 90000); // ✅ longer for slow/cold networks
+  }, 90000);
 }
 
-// ✅ prevents double triggering (direct handler + delegation)
+// ✅ prevents double triggering
 let _allocateInFlight = false;
 
 async function allocateClickFlow() {
@@ -599,7 +606,7 @@ async function allocateClickFlow() {
   try {
     if (statusMessage) {
       statusMessage.style.color = "white";
-      statusMessage.textContent = "";
+      statusMessage.textContent = "✅ Click received. Starting allocation flow...";
     }
 
     const agentOk = await isAgentOnline();
@@ -656,7 +663,6 @@ async function allocateClickFlow() {
 
     const base = await apiBase();
 
-    // Non-fatal timeout, then poll /my_vm
     try {
       await fetchJsonWithTimeout(`${base}/allocate`, {
         method: "POST",
@@ -700,47 +706,57 @@ async function allocateClickFlow() {
   }
 }
 
-// ✅ MUST: expose globally so delegation/inline can always call it
+// ✅ expose globally (inline + delegation always works)
 window.allocateClickFlow = allocateClickFlow;
 
 // ==================================================
-// ✅ Allocate button binding (NEW)
+// ✅ Allocate wiring (THE FIX)
 // ==================================================
-function bindAllocateButton() {
-  const allocateBtn = document.getElementById("allocate-btn");
-  if (!allocateBtn) {
-    console.warn("bindAllocateButton: #allocate-btn not found");
-    return;
+function ensureAllocateWiring() {
+  if (window.location.pathname.toLowerCase() !== "/allocate") return;
+
+  const btn = document.getElementById("allocate-btn");
+  if (!btn) return;
+
+  // make sure it's actually clickable and not covered by some styling
+  btn.style.pointerEvents = "auto";
+  btn.style.position = "relative";
+  btn.style.zIndex = "9999";
+
+  // ✅ inline onclick fallback (cannot be “lost” like addEventListener)
+  if (!btn.onclick) {
+    btn.onclick = async (e) => {
+      console.log("✅ Allocate button clicked (inline onclick fallback)", { disabled: btn.disabled });
+      e?.preventDefault?.();
+      e?.stopPropagation?.();
+      if (btn.disabled) return;
+      await window.allocateClickFlow();
+    };
   }
 
-  // If DOM replaced, it's a new node => dataset missing => will bind again (good)
+  // ✅ normal listener too (kept)
+  bindAllocateButton();
+}
+
+function bindAllocateButton() {
+  const allocateBtn = document.getElementById("allocate-btn");
+  if (!allocateBtn) return;
+
   if (allocateBtn.dataset.bound === "1") return;
   allocateBtn.dataset.bound = "1";
 
   allocateBtn.addEventListener("click", async (e) => {
-    console.log("✅ Allocate button clicked (direct handler)", { disabled: allocateBtn.disabled });
+    console.log("✅ Allocate button clicked (direct listener)", { disabled: allocateBtn.disabled });
     e.preventDefault();
     e.stopPropagation();
-
     if (allocateBtn.disabled) return;
-
-    try {
-      await window.allocateClickFlow();
-    } catch (err) {
-      console.error("allocateClickFlow crashed:", err);
-      const sm = document.getElementById("status-message");
-      if (sm) {
-        sm.style.color = "crimson";
-        sm.textContent = `❌ ${err?.message || err}`;
-      }
-    }
+    await window.allocateClickFlow();
   });
 
   console.log("✅ Bound direct click handler to #allocate-btn");
 }
 
-// Event delegation fallback: if SPA ever replaces the button node,
-// clicks still work. Uses CAPTURE so it fires even if something stops bubbling.
+// Document-level capture delegation fallback
 let _delegateBound = false;
 function bindAllocateDelegationFallback() {
   if (_delegateBound) return;
@@ -756,12 +772,20 @@ function bindAllocateDelegationFallback() {
     console.log("🛟 Delegation caught click on #allocate-btn", { disabled: btn.disabled });
     e.preventDefault();
     e.stopPropagation();
-
     if (btn.disabled) return;
 
-    // Always call the global flow (works even if handler wasn't bound)
     await window.allocateClickFlow();
   }, true);
+}
+
+// ✅ Watchdog: while on /allocate keep wiring alive (handles timing/DOM replacement)
+let _allocateWireTimer = null;
+function startAllocateWireWatchdog() {
+  if (_allocateWireTimer) return;
+  _allocateWireTimer = setInterval(() => {
+    if (window.location.pathname.toLowerCase() !== "/allocate") return;
+    ensureAllocateWiring();
+  }, 500);
 }
 
 // ==================================================
@@ -770,28 +794,31 @@ function bindAllocateDelegationFallback() {
 document.addEventListener("DOMContentLoaded", async () => {
   routeByPath();
 
-  // Always bind delegation fallback once
   bindAllocateDelegationFallback();
+  startAllocateWireWatchdog();
 
   const sb = await getSb();
   if (!sb) return;
 
   await refreshUIForSession();
 
-  // After session routing, ensure allocate handler exists if we're on allocate
-  bindAllocateButton();
+  ensureAllocateWiring();
 
   if (window.location.pathname.toLowerCase() === "/allocate") {
     await updateAllocateGate();
     startAgentGatePolling();
+    ensureAllocateWiring();
   }
 
   sb.auth.onAuthStateChange(async () => {
     await refreshUIForSession();
-    bindAllocateButton(); // ✅ rebind after auth changes can re-render view
+
+    ensureAllocateWiring();
+
     if (window.location.pathname.toLowerCase() === "/allocate") {
       await updateAllocateGate();
       startAgentGatePolling();
+      ensureAllocateWiring();
     }
   });
 
@@ -800,6 +827,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     retry.addEventListener("click", async () => {
       await updateAllocateGate();
       startAgentGatePolling();
+      ensureAllocateWiring();
     });
   }
 
@@ -820,5 +848,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  window.addEventListener("popstate", () => routeByPath());
+  window.addEventListener("popstate", () => {
+    routeByPath();
+    ensureAllocateWiring();
+  });
 });
