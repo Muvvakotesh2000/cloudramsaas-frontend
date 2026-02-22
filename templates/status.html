@@ -82,7 +82,6 @@
     <div class="muted" id="stopped-hint" style="margin-bottom:10px;"></div>
 
     <div style="display:flex; gap:10px; flex-wrap:wrap;">
-      <!-- ✅ FIX: Buttons are never cloned/replaced. Handlers use closure via data-vmid attribute. -->
       <button class="button" id="resume-vm-btn" type="button">Resume VM</button>
       <button class="button danger" id="new-vm-btn" type="button">Create New VM (Terminate old)</button>
       <span id="stopped-spinner" style="display:none;" class="spinner"></span>
@@ -138,8 +137,10 @@
   async function fetchJson(url, opts = {}) {
     const r = await fetch(url, opts);
     const text = await r.text();
+
     let data;
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
     if (!r.ok) {
       const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
       throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
@@ -156,94 +157,72 @@
     }
   }
 
-  // ✅ FIX: Hardened auth — retries getSession up to 5x with delays,
-  //    falls back to localStorage. Mirrors script.js getAccessTokenResilient().
-  async function getAccessTokenResilient() {
-    // Wait for status_auth.js deferred script to finish (race condition guard)
-    let waited = 0;
-    while (!window.getAuthHeaders && waited < 4000) {
-      await new Promise(r => setTimeout(r, 200));
-      waited += 200;
+  async function getAccessToken() {
+    if (window.getAuthHeaders) {
+      const h = await window.getAuthHeaders();
+      const auth = h.Authorization || h.authorization || "";
+      return auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
     }
-
-    // Try window.getAccessToken (from status_auth.js) with retries
-    if (window.getAccessToken) {
-      for (let i = 1; i <= 5; i++) {
-        try {
-          const token = await Promise.race([
-            window.getAccessToken(),
-            new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 10000))
-          ]);
-          if (token) {
-            localStorage.setItem("sb_access_token", token);
-            return token;
-          }
-        } catch (e) {
-          console.warn(`getAccessToken attempt ${i} failed:`, e.message);
-          if (i < 5) await new Promise(r => setTimeout(r, 600 * i));
-        }
-      }
-    }
-
-    // Fallback to localStorage
-    const ls = localStorage.getItem("sb_access_token");
-    if (ls) return ls;
-
-    throw new Error("Session expired. Please login again.");
-  }
-
-  async function getAuthHeadersResilient() {
-    const token = await getAccessTokenResilient();
-    return { Authorization: `Bearer ${token}` };
+    return localStorage.getItem("sb_access_token") || "";
   }
 
   async function getUserId() {
     const sb = window._sbClient;
     if (!sb) throw new Error("Supabase client not initialized.");
     const { data: { user } } = await sb.auth.getUser();
-    if (!user?.id) throw new Error("Could not determine user_id.");
-    return user.id;
+    const user_id = user?.id;
+    if (!user_id) throw new Error("Could not determine user_id.");
+    return user_id;
   }
 
-  // ========= Stopped-actions panel =========
-  // ✅ FIX: Never clone/replace buttons. Store the current vmId in a module-level
-  //    variable (_stoppedVmId) and read it inside the handler at click time.
-  //    Handlers are bound ONCE on DOMContentLoaded and never re-bound.
-  let _stoppedVmId = null;
-
+  // ✅ FIX: Accept an optional vmIdOverride so buttons always have the right ID
   function showStoppedActions(show, hintText = "", vmIdOverride = null) {
     const panel = document.getElementById("stopped-actions");
-    const hint  = document.getElementById("stopped-hint");
-    const statusEl = document.getElementById("stopped-status");
-
+    const hint = document.getElementById("stopped-hint");
     if (!panel) return;
+    panel.style.display = show ? "block" : "none";
+    if (hint) hint.textContent = hintText || "";
 
-    // Always reset status text when toggling
-    if (statusEl) statusEl.textContent = "";
-
+    // ✅ FIX: Rebind buttons every time we show the panel so handlers are always fresh
     if (show) {
-      // ✅ Store for use by click handlers (no cloning needed)
-      _stoppedVmId = vmIdOverride || vmId || localStorage.getItem("vm_id");
-      if (hint) hint.textContent = hintText || "";
-      panel.style.display = "block";
+      const effectiveVmId = vmIdOverride || vmId || localStorage.getItem("vm_id");
 
-      // Re-enable buttons in case they were disabled from a previous attempt
       const resumeBtn = document.getElementById("resume-vm-btn");
-      const newBtn    = document.getElementById("new-vm-btn");
-      if (resumeBtn) resumeBtn.disabled = false;
-      if (newBtn)    newBtn.disabled    = false;
-    } else {
-      panel.style.display = "none";
+      const newBtn = document.getElementById("new-vm-btn");
+
+      if (resumeBtn) {
+        // Clone-replace to strip any stale listeners, then add fresh one
+        const freshResume = resumeBtn.cloneNode(true);
+        resumeBtn.parentNode.replaceChild(freshResume, resumeBtn);
+        freshResume.addEventListener("click", () => resumeVmNow(effectiveVmId));
+      }
+
+      if (newBtn) {
+        const freshNew = newBtn.cloneNode(true);
+        newBtn.parentNode.replaceChild(freshNew, newBtn);
+        freshNew.addEventListener("click", () => terminateAndCreateNewHint(effectiveVmId));
+      }
     }
   }
 
-  // ========= VM data fetching =========
+  // ---------------------------
+  // ✅ ALWAYS refresh VM from backend (/my_vm)
+  // ---------------------------
   async function fetchMyVmWithRetries(maxTries = 30, delayMs = 5000) {
-    const headers = await getAuthHeadersResilient();
+    // ✅ FIX: Wait for getAuthHeaders to be ready (deferred script race condition)
+    let attempts = 0;
+    while (!window.getAuthHeaders && attempts < 20) {
+      await new Promise(r => setTimeout(r, 200));
+      attempts++;
+    }
+    if (!window.getAuthHeaders) throw new Error("Auth not initialized. Please refresh the page.");
+
+    const headers = await window.getAuthHeaders();
     const base = await apiBase();
 
     for (let i = 1; i <= maxTries; i++) {
       const resp = await fetch(`${base}/my_vm`, { headers, cache: "no-store" });
+
       const text = await resp.text();
       let info;
       try { info = JSON.parse(text); } catch { info = { raw: text }; }
@@ -271,7 +250,9 @@
     for (let i = 1; i <= maxTries; i++) {
       const info = await fetchMyVmWithRetries(1, 0);
       if (!info.exists) throw new Error("VM not found anymore.");
-      if (info.vm_id && info.vm_id !== vm_id) vm_id = info.vm_id;
+      if (info.vm_id && info.vm_id !== vm_id) {
+        vm_id = info.vm_id;
+      }
       if (info.state === "running" && info.ip) return info;
       document.getElementById("status-text").innerHTML =
         `⏳ Waiting for VM to become RUNNING and get IP... (try ${i}/${maxTries})`;
@@ -281,15 +262,12 @@
   }
 
   // ========= Dashboard init =========
+  // ✅ FIX: Do NOT bind stopped-action buttons here at all — showStoppedActions() handles it
   document.addEventListener("DOMContentLoaded", async () => {
-    // ✅ FIX: Bind stopped-action buttons ONCE here, read _stoppedVmId at click time
-    document.getElementById("resume-vm-btn")?.addEventListener("click", () => resumeVmNow(_stoppedVmId));
-    document.getElementById("new-vm-btn")?.addEventListener("click",   () => terminateAndCreateNewHint(_stoppedVmId));
-
-    document.getElementById("stop-vm-btn")?.addEventListener("click",         stopVmNow);
-    document.getElementById("migrate-btn")?.addEventListener("click",          migrateSelectedTasks);
-    document.getElementById("migrate-vscode-btn")?.addEventListener("click",   migrateVSCodeProject);
-    document.getElementById("save-local-btn")?.addEventListener("click",       saveProjectToLocal);
+    document.getElementById("stop-vm-btn")?.addEventListener("click", stopVmNow);
+    document.getElementById("migrate-btn")?.addEventListener("click", migrateSelectedTasks);
+    document.getElementById("migrate-vscode-btn")?.addEventListener("click", migrateVSCodeProject);
+    document.getElementById("save-local-btn")?.addEventListener("click", saveProjectToLocal);
 
     await initDashboard();
   });
@@ -307,15 +285,17 @@
         return;
       }
 
-      // Store VM identifiers
+      // ✅ FIX: Store vm_id/vmIp as soon as we get them, before any early returns
       vmId = info.vm_id || null;
       vmIp = info.ip || null;
+
       if (vmId) localStorage.setItem("vm_id", vmId);
       if (vmIp) localStorage.setItem("vm_ip", vmIp);
 
       if (info.state === "stopped" || info.state === "stopping") {
         document.getElementById("status-text").innerHTML =
           `🟡 VM is <b>${info.state}</b>. You can resume it here or create a new one.`;
+        // ✅ FIX: Pass vmId explicitly so buttons have the correct ID even before vmId global is set
         showStoppedActions(true, `VM ID: ${vmId || "unknown"}`, vmId);
         return;
       }
@@ -326,9 +306,13 @@
         return;
       }
 
+      // VNC link (new tab)
       loadVncGui();
+
+      // RAM usage
       await fetchRamUsage();
 
+      // Tasks
       const agentOk = await isAgentOnline();
       if (!agentOk) {
         const loadingText = document.getElementById("task-loading");
@@ -345,7 +329,7 @@
   }
 
   async function fetchRamUsage() {
-    const headers = await getAuthHeadersResilient();
+    const headers = await window.getAuthHeaders();
     const base = await apiBase();
 
     const response = await fetch(`${base}/ram_usage?vm_ip=${encodeURIComponent(vmIp)}`, { headers });
@@ -363,10 +347,12 @@
     `;
   }
 
-  // ========= Stop VM =========
+  // ---------------------------
+  // ✅ Stop VM via backend
+  // ---------------------------
   async function stopVmNow() {
-    const stopBtn  = document.getElementById("stop-vm-btn");
-    const spinner  = document.getElementById("stop-spinner");
+    const stopBtn = document.getElementById("stop-vm-btn");
+    const spinner = document.getElementById("stop-spinner");
     const statusEl = document.getElementById("stop-status");
 
     try {
@@ -375,7 +361,7 @@
       spinner.style.display = "inline-block";
       stopBtn.disabled = true;
 
-      const headers = await getAuthHeadersResilient();
+      const headers = await window.getAuthHeaders();
       const vm_id = vmId || localStorage.getItem("vm_id");
       if (!vm_id) throw new Error("No vm_id found. Please refresh the page.");
 
@@ -389,6 +375,7 @@
       const text = await resp.text();
       let data;
       try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
       if (!resp.ok) throw new Error(data.detail || data.error || data.raw || "Stop failed.");
 
       statusEl.style.color = "lightgreen";
@@ -405,21 +392,21 @@
     }
   }
 
-  // ========= Resume VM =========
-  // ✅ FIX: effectiveVmId passed from the bound handler via _stoppedVmId closure
+  // ---------------------------
+  // ✅ Resume VM — now receives vmId explicitly
+  // ---------------------------
   async function resumeVmNow(effectiveVmId) {
-    const btn      = document.getElementById("resume-vm-btn");
-    const spinner  = document.getElementById("stopped-spinner");
+    const btn = document.getElementById("resume-vm-btn");
+    const spinner = document.getElementById("stopped-spinner");
     const statusEl = document.getElementById("stopped-status");
 
     try {
       statusEl.textContent = "";
       statusEl.style.color = "white";
       spinner.style.display = "inline-block";
-      if (btn) btn.disabled = true;
+      btn.disabled = true;
 
-      // ✅ FIX: hardened auth, not plain getAuthHeaders()
-      const headers = await getAuthHeadersResilient();
+      const headers = await window.getAuthHeaders();
       const vm_id = effectiveVmId || vmId || localStorage.getItem("vm_id");
       if (!vm_id) throw new Error("No vm_id found. Please refresh the page.");
 
@@ -452,15 +439,18 @@
       statusEl.textContent = `❌ ${e.message || e}`;
     } finally {
       spinner.style.display = "none";
-      const b = document.getElementById("resume-vm-btn");
-      if (b) b.disabled = false;
+      if (document.getElementById("resume-vm-btn")) {
+        document.getElementById("resume-vm-btn").disabled = false;
+      }
     }
   }
 
-  // ========= Terminate VM =========
+  // ---------------------------
+  // ✅ Terminate VM — now receives vmId explicitly
+  // ---------------------------
   async function terminateAndCreateNewHint(effectiveVmId) {
-    const btn      = document.getElementById("new-vm-btn");
-    const spinner  = document.getElementById("stopped-spinner");
+    const btn = document.getElementById("new-vm-btn");
+    const spinner = document.getElementById("stopped-spinner");
     const statusEl = document.getElementById("stopped-status");
 
     const ok = confirm("This will TERMINATE your existing VM and ALL data will be lost. Continue?");
@@ -470,10 +460,9 @@
       statusEl.textContent = "";
       statusEl.style.color = "white";
       spinner.style.display = "inline-block";
-      if (btn) btn.disabled = true;
+      btn.disabled = true;
 
-      // ✅ FIX: hardened auth
-      const headers = await getAuthHeadersResilient();
+      const headers = await window.getAuthHeaders();
       const vm_id = effectiveVmId || vmId || localStorage.getItem("vm_id");
       if (!vm_id) throw new Error("No vm_id found. Please refresh the page.");
 
@@ -499,14 +488,17 @@
       statusEl.textContent = `❌ ${e.message || e}`;
     } finally {
       spinner.style.display = "none";
-      const b = document.getElementById("new-vm-btn");
-      if (b) b.disabled = false;
+      if (document.getElementById("new-vm-btn")) {
+        document.getElementById("new-vm-btn").disabled = false;
+      }
     }
   }
 
-  // ========= Tasks =========
+  // ---------------------------
+  // ✅ Tasks list via Local Agent
+  // ---------------------------
   async function fetchLocalTasksViaAgent() {
-    const taskList   = document.getElementById("tasks");
+    const taskList = document.getElementById("tasks");
     const loadingText = document.getElementById("task-loading");
 
     loadingText.style.display = "block";
@@ -563,10 +555,13 @@
     });
   }
 
+  // ---------------------------
+  // ✅ Migrate Selected Tasks via Local Agent
+  // ---------------------------
   async function migrateSelectedTasks() {
     const migrateBtn = document.getElementById("migrate-btn");
-    const spinner    = document.getElementById("migration-spinner");
-    const statusEl   = document.getElementById("migration-status");
+    const spinner = document.getElementById("migration-spinner");
+    const statusEl = document.getElementById("migration-status");
     const taskSelect = document.getElementById("tasks");
 
     try {
@@ -590,8 +585,10 @@
       }
 
       const task_names = selectedOptions.map(opt => opt.text.split(" (PID:")[0].trim());
-      const access_token = await getAccessTokenResilient();
+
+      const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
+
       const user_id = await getUserId();
 
       const result = await fetchJson(`${AGENT_BASE}/migrate_tasks`, {
@@ -601,7 +598,7 @@
       });
 
       const okCount = (result.results || []).filter(r => r.success).length;
-      const total   = (result.results || []).length;
+      const total = (result.results || []).length;
 
       statusEl.style.color = "lightgreen";
       statusEl.textContent = `✅ Migration completed: ${okCount}/${total} succeeded.`;
@@ -616,8 +613,8 @@
   }
 
   async function migrateVSCodeProject() {
-    const btn      = document.getElementById("migrate-vscode-btn");
-    const spinner  = document.getElementById("vscode-spinner");
+    const btn = document.getElementById("migrate-vscode-btn");
+    const spinner = document.getElementById("vscode-spinner");
     const statusEl = document.getElementById("vscode-status");
 
     try {
@@ -634,8 +631,9 @@
       vmIp = info.ip;
       localStorage.setItem("vm_ip", vmIp);
 
-      const access_token = await getAccessTokenResilient();
+      const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
+
       const user_id = await getUserId();
 
       const data = await fetchJson(`${AGENT_BASE}/migrate_vscode`, {
@@ -656,8 +654,8 @@
   }
 
   async function saveProjectToLocal() {
-    const btn      = document.getElementById("save-local-btn");
-    const spinner  = document.getElementById("save-local-spinner");
+    const btn = document.getElementById("save-local-btn");
+    const spinner = document.getElementById("save-local-spinner");
     const statusEl = document.getElementById("save-local-status");
 
     try {
@@ -676,8 +674,9 @@
       if (!info.exists || !info.ip) throw new Error("VM not running or missing IP.");
       vmIp = info.ip;
 
-      const access_token = await getAccessTokenResilient();
+      const access_token = await getAccessToken();
       if (!access_token) throw new Error("Missing Supabase access token.");
+
       const user_id = await getUserId();
 
       const resp = await fetchJson(`${AGENT_BASE}/save_project_to_local`, {
@@ -697,10 +696,12 @@
     }
   }
 
-  // ========= VNC =========
+  // ---------------------------
+  // ✅ VNC link
+  // ---------------------------
   function loadVncGui() {
     const loading = document.getElementById("vnc-loading");
-    const link    = document.getElementById("vnc-link");
+    const link = document.getElementById("vnc-link");
 
     if (!vmIp) {
       loading.style.color = "crimson";
@@ -711,6 +712,7 @@
     const vncUrl = `http://${vmIp}:8080/vnc.html?autoconnect=true&resize=scale`;
     loading.style.color = "lightgreen";
     loading.innerText = "✅ VNC available (opens in new tab).";
+
     link.href = vncUrl;
     link.style.display = "inline-block";
   }
