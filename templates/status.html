@@ -177,24 +177,36 @@
 
   // ✅ SHOW/HIDE stopped panel only (NO rebinding / cloneNode)
   function showStoppedActions(show, hintText = "", vmIdOverride = null) {
-    const panel = document.getElementById("stopped-actions");
-    const hint = document.getElementById("stopped-hint");
-    if (!panel) return;
+      const panel = document.getElementById("stopped-actions");
+      const hint = document.getElementById("stopped-hint");
+      if (!panel) return;
 
-    panel.style.display = show ? "block" : "none";
-    if (hint) hint.textContent = hintText || "";
+      panel.style.display = show ? "block" : "none";
+      if (hint) hint.textContent = hintText || "";
 
-    if (show) {
+      if (!show) return;
+
       const effectiveVmId = vmIdOverride || vmId || localStorage.getItem("vm_id");
       if (effectiveVmId) localStorage.setItem("vm_id", effectiveVmId);
 
-      // Force-enable every time we show it (in case previously disabled)
-      const r = document.getElementById("resume-vm-btn");
-      const n = document.getElementById("new-vm-btn");
-      if (r) r.disabled = false;
-      if (n) n.disabled = false;
+      // ✅ Resume button: clone -> replace -> bind to the CLONE
+      const resumeBtn = document.getElementById("resume-vm-btn");
+      if (resumeBtn && resumeBtn.parentNode) {
+        const freshResume = resumeBtn.cloneNode(true);
+        freshResume.disabled = false; // optional safety
+        resumeBtn.parentNode.replaceChild(freshResume, resumeBtn);
+        freshResume.addEventListener("click", () => resumeVmNow(effectiveVmId));
+      }
+
+      // ✅ New VM button: clone -> replace -> bind to the CLONE
+      const newBtn = document.getElementById("new-vm-btn");
+      if (newBtn && newBtn.parentNode) {
+        const freshNew = newBtn.cloneNode(true);
+        freshNew.disabled = false; // optional safety
+        newBtn.parentNode.replaceChild(freshNew, newBtn);
+        freshNew.addEventListener("click", () => terminateAndCreateNewHint(effectiveVmId));
+      }
     }
-  }
 
   // ✅ Event delegation so buttons are ALWAYS clickable
   let _stoppedDelegationBound = false;
