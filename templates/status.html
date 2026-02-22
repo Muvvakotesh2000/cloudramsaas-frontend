@@ -175,41 +175,74 @@
     return user_id;
   }
 
-  // ✅ FIX: Accept an optional vmIdOverride so buttons always have the right ID
+  // ✅ SHOW/HIDE stopped panel only (NO rebinding / cloneNode)
   function showStoppedActions(show, hintText = "", vmIdOverride = null) {
     const panel = document.getElementById("stopped-actions");
     const hint = document.getElementById("stopped-hint");
     if (!panel) return;
+
     panel.style.display = show ? "block" : "none";
     if (hint) hint.textContent = hintText || "";
 
-    // ✅ FIX: Rebind buttons every time we show the panel so handlers are always fresh
     if (show) {
       const effectiveVmId = vmIdOverride || vmId || localStorage.getItem("vm_id");
+      if (effectiveVmId) localStorage.setItem("vm_id", effectiveVmId);
 
-      const resumeBtn = document.getElementById("resume-vm-btn");
-      const newBtn = document.getElementById("new-vm-btn");
-
-      if (resumeBtn) {
-        // Clone-replace to strip any stale listeners, then add fresh one
-        const freshResume = resumeBtn.cloneNode(true);
-        resumeBtn.parentNode.replaceChild(freshResume, resumeBtn);
-        freshResume.addEventListener("click", () => resumeVmNow(effectiveVmId));
-      }
-
-      if (newBtn) {
-        const freshNew = newBtn.cloneNode(true);
-        newBtn.parentNode.replaceChild(freshNew, newBtn);
-        freshNew.addEventListener("click", () => terminateAndCreateNewHint(effectiveVmId));
-      }
+      // Force-enable every time we show it (in case previously disabled)
+      const r = document.getElementById("resume-vm-btn");
+      const n = document.getElementById("new-vm-btn");
+      if (r) r.disabled = false;
+      if (n) n.disabled = false;
     }
+  }
+
+  // ✅ Event delegation so buttons are ALWAYS clickable
+  let _stoppedDelegationBound = false;
+  function bindStoppedDelegation() {
+    if (_stoppedDelegationBound) return;
+    _stoppedDelegationBound = true;
+
+    document.addEventListener("click", (e) => {
+      let el = e.target;
+      if (el && el.nodeType === 3) el = el.parentElement;
+      if (!(el instanceof Element)) return;
+
+      const resume = el.closest("#resume-vm-btn");
+      const createNew = el.closest("#new-vm-btn");
+      if (!resume && !createNew) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Always compute at click time
+      const effectiveVmId = vmId || localStorage.getItem("vm_id");
+
+      console.log("🟡 stopped-actions click:", {
+        which: resume ? "resume" : "new",
+        effectiveVmId
+      });
+
+      if (!effectiveVmId) {
+        const statusEl = document.getElementById("stopped-status");
+        if (statusEl) {
+          statusEl.style.color = "crimson";
+          statusEl.textContent = "❌ No vm_id found. Please refresh the page.";
+        }
+        return;
+      }
+
+      if (resume) resumeVmNow(effectiveVmId);
+      if (createNew) terminateAndCreateNewHint(effectiveVmId);
+    }, true);
+
+    console.log("✅ Stopped-actions delegation bound");
   }
 
   // ---------------------------
   // ✅ ALWAYS refresh VM from backend (/my_vm)
   // ---------------------------
   async function fetchMyVmWithRetries(maxTries = 30, delayMs = 5000) {
-    // ✅ FIX: Wait for getAuthHeaders to be ready (deferred script race condition)
+    // Wait for status_auth.js to define getAuthHeaders (deferred script race)
     let attempts = 0;
     while (!window.getAuthHeaders && attempts < 20) {
       await new Promise(r => setTimeout(r, 200));
@@ -250,10 +283,11 @@
     for (let i = 1; i <= maxTries; i++) {
       const info = await fetchMyVmWithRetries(1, 0);
       if (!info.exists) throw new Error("VM not found anymore.");
-      if (info.vm_id && info.vm_id !== vm_id) {
-        vm_id = info.vm_id;
-      }
+
+      if (info.vm_id && info.vm_id !== vm_id) vm_id = info.vm_id;
+
       if (info.state === "running" && info.ip) return info;
+
       document.getElementById("status-text").innerHTML =
         `⏳ Waiting for VM to become RUNNING and get IP... (try ${i}/${maxTries})`;
       await new Promise(r => setTimeout(r, delayMs));
@@ -262,8 +296,9 @@
   }
 
   // ========= Dashboard init =========
-  // ✅ FIX: Do NOT bind stopped-action buttons here at all — showStoppedActions() handles it
   document.addEventListener("DOMContentLoaded", async () => {
+    bindStoppedDelegation(); // ✅ important
+
     document.getElementById("stop-vm-btn")?.addEventListener("click", stopVmNow);
     document.getElementById("migrate-btn")?.addEventListener("click", migrateSelectedTasks);
     document.getElementById("migrate-vscode-btn")?.addEventListener("click", migrateVSCodeProject);
@@ -285,17 +320,15 @@
         return;
       }
 
-      // ✅ FIX: Store vm_id/vmIp as soon as we get them, before any early returns
+      // Store ASAP
       vmId = info.vm_id || null;
       vmIp = info.ip || null;
-
       if (vmId) localStorage.setItem("vm_id", vmId);
       if (vmIp) localStorage.setItem("vm_ip", vmIp);
 
       if (info.state === "stopped" || info.state === "stopping") {
         document.getElementById("status-text").innerHTML =
           `🟡 VM is <b>${info.state}</b>. You can resume it here or create a new one.`;
-        // ✅ FIX: Pass vmId explicitly so buttons have the correct ID even before vmId global is set
         showStoppedActions(true, `VM ID: ${vmId || "unknown"}`, vmId);
         return;
       }
@@ -306,7 +339,7 @@
         return;
       }
 
-      // VNC link (new tab)
+      // VNC link
       loadVncGui();
 
       // RAM usage
@@ -393,7 +426,7 @@
   }
 
   // ---------------------------
-  // ✅ Resume VM — now receives vmId explicitly
+  // ✅ Resume VM (vm_id passed explicitly)
   // ---------------------------
   async function resumeVmNow(effectiveVmId) {
     const btn = document.getElementById("resume-vm-btn");
@@ -404,7 +437,7 @@
       statusEl.textContent = "";
       statusEl.style.color = "white";
       spinner.style.display = "inline-block";
-      btn.disabled = true;
+      if (btn) btn.disabled = true;
 
       const headers = await window.getAuthHeaders();
       const vm_id = effectiveVmId || vmId || localStorage.getItem("vm_id");
@@ -439,14 +472,12 @@
       statusEl.textContent = `❌ ${e.message || e}`;
     } finally {
       spinner.style.display = "none";
-      if (document.getElementById("resume-vm-btn")) {
-        document.getElementById("resume-vm-btn").disabled = false;
-      }
+      if (btn) btn.disabled = false;
     }
   }
 
   // ---------------------------
-  // ✅ Terminate VM — now receives vmId explicitly
+  // ✅ Terminate VM (vm_id passed explicitly)
   // ---------------------------
   async function terminateAndCreateNewHint(effectiveVmId) {
     const btn = document.getElementById("new-vm-btn");
@@ -460,7 +491,7 @@
       statusEl.textContent = "";
       statusEl.style.color = "white";
       spinner.style.display = "inline-block";
-      btn.disabled = true;
+      if (btn) btn.disabled = true;
 
       const headers = await window.getAuthHeaders();
       const vm_id = effectiveVmId || vmId || localStorage.getItem("vm_id");
@@ -488,9 +519,7 @@
       statusEl.textContent = `❌ ${e.message || e}`;
     } finally {
       spinner.style.display = "none";
-      if (document.getElementById("new-vm-btn")) {
-        document.getElementById("new-vm-btn").disabled = false;
-      }
+      if (btn) btn.disabled = false;
     }
   }
 
