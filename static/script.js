@@ -1,10 +1,6 @@
-// frontend/static/script.js (FULL FILE — FINAL FIX: Allocate always works, no refresh needed)
-// ✅ Fixes:
-//   1) Inline onclick fallback needs window.allocateClickFlow (we export it)
-//   2) Supabase getSession can time out -> allocation flow stalls (we add timeout + retries + localStorage fallback)
-//   3) Binding is made reliable (bind on allocate page show + delegation fallback)
-//
-// NOTE: This does NOT remove your features. It only hardens auth + click.
+// frontend/static/script.js (FULL FILE — corrected again: my_vm polling is timeout-tolerant)
+// ✅ Resume/Allocate will NOT fail on a single my_vm timeout
+// ✅ my_vm polling uses longer per-request timeout + keeps retrying until overall max time
 
 console.log("✅ script.js loaded");
 
@@ -36,18 +32,6 @@ function isAbortError(e) {
 
 function isTimeoutMessage(e) {
   return String(e?.message || e || "").toLowerCase().includes("timed out");
-}
-
-async function withTimeout(promise, ms, msg) {
-  let t;
-  const timeout = new Promise((_, rej) => {
-    t = setTimeout(() => rej(new Error(msg || `Timed out after ${ms}ms`)), ms);
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(t);
-  }
 }
 
 async function fetchWithTimeout(url, opts = {}, timeoutMs = 30000) {
@@ -121,53 +105,6 @@ async function copyTextReliable(text) {
   } catch {
     return { ok: false, method: "none" };
   }
-}
-
-// ==================================================
-// ✅ Supabase (Hardened: session timeout safe)
-// ==================================================
-async function getSb() {
-  if (window._sbClient) return window._sbClient;
-  const cfg = await window.loadAppConfig();
-  if (!window.supabase || !window.supabase.createClient) {
-    console.error("❌ Supabase SDK not loaded. Check index.html script order.");
-    return null;
-  }
-  window._sbClient = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
-  return window._sbClient;
-}
-
-// ✅ resilient token fetch: retry + timeout + localStorage fallback
-async function getAccessTokenResilient() {
-  // 1) try supabase session a few times (sometimes it cold-starts / times out)
-  try {
-    const sb = await getSb();
-    if (sb) {
-      for (let i = 1; i <= 5; i++) {
-        try {
-          const { data } = await withTimeout(
-            sb.auth.getSession(),
-            12000,
-            "Supabase getSession() timed out after 12s"
-          );
-          const token = data?.session?.access_token;
-          if (token) {
-            localStorage.setItem("sb_access_token", token);
-            return token;
-          }
-        } catch (e) {
-          // retry
-          await sleep(600 * i);
-        }
-      }
-    }
-  } catch {}
-
-  // 2) fallback localStorage
-  const ls = localStorage.getItem("sb_access_token");
-  if (ls) return ls;
-
-  return "";
 }
 
 // ==================================================
@@ -297,7 +234,6 @@ function navigate(page, pushState = true) {
 
   if (page === "allocate") {
     setTimeout(async () => {
-      bindAllocateButton();      // ✅ important
       await updateAllocateGate();
       startAgentGatePolling();
 
@@ -323,22 +259,32 @@ function routeByPath() {
 window.navigate = navigate;
 
 // ==================================================
-// ✅ Session-aware UI refresh (hardened)
+// ✅ Supabase
 // ==================================================
+async function getSb() {
+  if (window._sbClient) return window._sbClient;
+  const cfg = await window.loadAppConfig();
+  if (!window.supabase || !window.supabase.createClient) {
+    console.error("❌ Supabase SDK not loaded. Check index.html script order.");
+    return null;
+  }
+  window._sbClient = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+  return window._sbClient;
+}
+
 async function refreshUIForSession() {
   const sb = await getSb();
   if (!sb) return;
 
-  const token = await getAccessTokenResilient();
-  if (!token) {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) {
     localStorage.removeItem("sb_access_token");
     const p = window.location.pathname.toLowerCase();
     if (p !== "/login" && p !== "/register") navigate("login", false);
     return;
   }
 
-  // token exists -> show correct page
-  localStorage.setItem("sb_access_token", token);
+  localStorage.setItem("sb_access_token", session.access_token);
 
   const path = window.location.pathname.toLowerCase();
   if (path === "/allocate") navigate("allocate", false);
@@ -347,12 +293,8 @@ async function refreshUIForSession() {
   else if (path === "/register") navigate("register", false);
   else navigate("home", false);
 
-  // try to show email (best effort)
-  try {
-    const { data: { user } } = await withTimeout(sb.auth.getUser(), 10000, "Supabase getUser() timed out after 10s");
-    const userEmailEl = document.getElementById("user-email");
-    if (userEmailEl && user?.email) userEmailEl.textContent = `Logged in as: ${user.email}`;
-  } catch {}
+  const userEmailEl = document.getElementById("user-email");
+  if (userEmailEl) userEmailEl.textContent = `Logged in as: ${session.user.email}`;
 }
 
 // ==================================================
@@ -456,7 +398,7 @@ window.logout = logout;
 async function pollVmUntilRunning(accessToken, {
   maxMinutes = 15,
   intervalMs = 5000,
-  requestTimeoutMs = 90000,
+  requestTimeoutMs = 90000, // ✅ per-request timeout
   statusPrefix = "⏳"
 } = {}) {
   const base = await apiBase();
@@ -473,6 +415,7 @@ async function pollVmUntilRunning(accessToken, {
     try {
       info = await fetchJsonWithTimeout(url, { headers }, requestTimeoutMs);
     } catch (e) {
+      // ✅ IMPORTANT: tolerate timeouts during polling
       if (isTimeoutMessage(e)) {
         const sm = document.getElementById("status-message");
         if (sm) {
@@ -482,7 +425,7 @@ async function pollVmUntilRunning(accessToken, {
         await sleep(intervalMs);
         continue;
       }
-      throw e;
+      throw e; // real error (401, 500, etc.)
     }
 
     if (info?.vm_id) localStorage.setItem("vm_id", info.vm_id);
@@ -495,6 +438,7 @@ async function pollVmUntilRunning(accessToken, {
     }
 
     if (!info.exists) throw new Error("No VM found while waiting. Please click Allocate again.");
+
     if (info.state === "running" && info.ip) return info;
 
     await sleep(intervalMs);
@@ -519,10 +463,10 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
       <div style="font-weight:bold;">🟡 Existing VM is STOPPED.</div>
       <div style="margin-top:6px;">VM ID: ${vmInfo.vm_id}</div>
       <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <button id="resume-vm-btn" type="button" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
+        <button id="resume-vm-btn" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
           Resume stopped instance
         </button>
-        <button id="new-vm-btn" type="button" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
+        <button id="new-vm-btn" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
           Create new instance (terminate old)
         </button>
       </div>
@@ -542,6 +486,7 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
 
         const base = await apiBase();
 
+        // Short timeout request, not fatal if it times out
         try {
           await fetchJsonWithTimeout(`${base}/start_vm`, {
             method: "POST",
@@ -553,6 +498,7 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
           }, 25000);
         } catch (e) {
           if (!isTimeoutMessage(e)) throw e;
+          // If timed out, still proceed to poll
           const sm = document.getElementById("status-message");
           if (sm) {
             sm.style.color = "white";
@@ -560,6 +506,7 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
           }
         }
 
+        // Poll until running + IP
         await pollVmUntilRunning(accessToken, {
           maxMinutes: 15,
           intervalMs: 5000,
@@ -623,12 +570,11 @@ async function getMyVmInfo(accessToken) {
   const base = await apiBase();
   return await fetchJsonWithTimeout(`${base}/my_vm`, {
     headers: { "Authorization": `Bearer ${accessToken}` }
-  }, 90000);
+  }, 90000); // ✅ longer for slow/cold networks
 }
 
 async function allocateClickFlow() {
-  console.log("✅ Click received. Starting allocation flow...");
-
+  const sb = await getSb();
   const statusMessage = document.getElementById("status-message");
   const ramSize = parseInt(document.getElementById("ram")?.value || "1", 10);
 
@@ -649,21 +595,16 @@ async function allocateClickFlow() {
       return;
     }
 
-    // ✅ hardened token retrieval (no hanging getSession)
-    const accessToken = await getAccessTokenResilient();
-    if (!accessToken) {
-      if (statusMessage) {
-        statusMessage.style.color = "crimson";
-        statusMessage.textContent = "❌ Session not ready. Please login again.";
-      }
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) {
       navigate("login");
       return;
     }
+    const accessToken = session.access_token;
     localStorage.setItem("sb_access_token", accessToken);
 
     setAllocateBusy(true, "Checking existing VM...");
 
-    // ✅ This was the step you said it doesn't reach — now it will or show error.
     const info = await getMyVmInfo(accessToken);
 
     if (info?.vm_id) localStorage.setItem("vm_id", info.vm_id);
@@ -697,6 +638,7 @@ async function allocateClickFlow() {
 
     const base = await apiBase();
 
+    // Non-fatal timeout, then poll /my_vm
     try {
       await fetchJsonWithTimeout(`${base}/allocate`, {
         method: "POST",
@@ -728,7 +670,6 @@ async function allocateClickFlow() {
     await sleep(350);
     window.location.href = "/status";
   } catch (err) {
-    console.error("allocateClickFlow error:", err);
     if (statusMessage) {
       statusMessage.style.color = "crimson";
       statusMessage.textContent = `❌ ${err.message || err}`;
@@ -739,69 +680,16 @@ async function allocateClickFlow() {
   }
 }
 
-// ✅ IMPORTANT: export so your inline onclick works 100%
-window.allocateClickFlow = allocateClickFlow;
-
-// ==================================================
-// ✅ Allocate button binding (reliable + delegation fallback)
-// ==================================================
-function bindAllocateButton() {
-  const allocateBtn = document.getElementById("allocate-btn");
-  if (!allocateBtn) {
-    console.warn("bindAllocateButton: #allocate-btn not found");
-    return;
-  }
-
-  if (allocateBtn.dataset.bound === "1") return;
-  allocateBtn.dataset.bound = "1";
-
-  allocateBtn.addEventListener("click", async (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    await allocateClickFlow();
-  });
-
-  console.log("✅ Bound click handler to #allocate-btn");
-}
-
-let _delegateBound = false;
-function bindAllocateDelegationFallback() {
-  if (_delegateBound) return;
-  _delegateBound = true;
-
-  document.addEventListener("click", async (e) => {
-    const t = e.target;
-    if (!(t instanceof Element)) return;
-
-    const btn = t.closest("#allocate-btn");
-    if (!btn) return;
-
-    // allow normal handler if already bound
-    if (btn.dataset.bound === "1") return;
-
-    e.preventDefault();
-    e.stopPropagation();
-    if (btn.disabled) return;
-
-    console.log("🛟 Delegation caught click on #allocate-btn");
-    await allocateClickFlow();
-  }, true);
-}
-
 // ==================================================
 // ✅ INIT
 // ==================================================
 document.addEventListener("DOMContentLoaded", async () => {
   routeByPath();
 
-  bindAllocateDelegationFallback();
-
   const sb = await getSb();
   if (!sb) return;
 
   await refreshUIForSession();
-
-  bindAllocateButton();
 
   if (window.location.pathname.toLowerCase() === "/allocate") {
     await updateAllocateGate();
@@ -810,7 +698,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   sb.auth.onAuthStateChange(async () => {
     await refreshUIForSession();
-    bindAllocateButton();
     if (window.location.pathname.toLowerCase() === "/allocate") {
       await updateAllocateGate();
       startAgentGatePolling();
