@@ -7,12 +7,11 @@
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
 
-  <!-- ✅ Click-safety rules to prevent invisible overlays stealing clicks -->
+  <!-- ✅ Click-safety rules -->
   <style>
     #loading-text { pointer-events: none; }
-    #status-message { pointer-events: none; }
+    #status-message { pointer-events: auto; } /* ✅ must be auto because buttons are injected here */
 
-    /* Ensure allocate button is always clickable above nearby panels */
     #allocate-btn {
       position: relative;
       z-index: 50;
@@ -24,10 +23,7 @@
     }
   </style>
 
-  <!-- Supabase -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-
-  <!-- Existing app scripts -->
   <script src="/static/config.js" defer></script>
   <script src="/static/script.js" defer></script>
 </head>
@@ -137,15 +133,11 @@
              style="margin-top:10px; font-weight:bold;"></div>
 
         <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
-          <button class="button"
-                  id="allocate-install-run"
-                  type="button">
+          <button class="button" id="allocate-install-run" type="button">
             Install & Run Agent
           </button>
 
-          <button class="button"
-                  id="allocate-agent-retry"
-                  type="button">
+          <button class="button" id="allocate-agent-retry" type="button">
             Retry Agent
           </button>
         </div>
@@ -162,7 +154,6 @@
         <option value="4">4 GB</option>
       </select>
 
-      <!-- ✅ IMPORTANT: Inline onclick fallback (works even if JS binding fails) -->
       <button id="allocate-btn" type="button" disabled onclick="window.allocateClickFlow && window.allocateClickFlow()">Allocate</button>
 
       <p id="loading-text" style="display:none; color:blue;">Processing...</p>

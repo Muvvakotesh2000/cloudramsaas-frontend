@@ -44,9 +44,7 @@ h1 {
   margin-bottom: 20px;
 }
 
-/* ✅ FIX: do NOT apply spacing to *all* divs globally
-   This was causing nested injected divs (#status-message) to add margins,
-   which can create invisible overlapping blocks and break clicks. */
+/* ✅ FIX: remove global div rule that can cause invisible overlaps */
 #app > div {
   margin-bottom: 15px;
 }
@@ -94,16 +92,4 @@ ul {
 
 p {
   margin: 10px 0;
-}
-
-/* ✅ Click-safety for Allocate stopped-VM injected UI */
-#status-message,
-#status-message * {
-  pointer-events: auto;
-}
-
-/* ✅ Loading and status text should never block clicks */
-#loading-text,
-#allocate-agent-status {
-  pointer-events: none;
 }

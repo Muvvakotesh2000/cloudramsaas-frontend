@@ -1,9 +1,9 @@
 // frontend/static/script.js
 // ✅ FIXES:
-//   - renderStoppedVmChoices: always fetches fresh token (not stale passed-in token)
-//   - Resume/Terminate buttons: capturedVmId in closure, re-enable on error
-//   - Supabase getSession() timeout: 30s + localStorage fallback
-//   - Allocate buttons via event delegation
+//   - renderStoppedVmChoices uses global getFreshAccessToken() (no duplicate token logic)
+//   - Token is "primed" when entering /allocate to avoid first-click auth race
+//   - Resume/Terminate: token fetch has a 15s timeout so it never hangs forever
+//   - Allocate buttons via event delegation remain
 
 console.log("✅ script.js loaded");
 
@@ -258,6 +258,13 @@ function navigate(page, pushState = true) {
       await updateAllocateGate();
       startAgentGatePolling();
 
+      // ✅ Prime token early to avoid "first click authenticating forever"
+      try {
+        await getFreshAccessToken();
+      } catch (e) {
+        console.warn("Token prime failed (will retry on click):", e);
+      }
+
       const statusMessage = document.getElementById("status-message");
       if (statusMessage) {
         statusMessage.style.color = "white";
@@ -486,10 +493,9 @@ async function pollVmUntilRunning(accessToken, {
 }
 
 // ==================================================
-// ✅ Existing VM UI (stopped) — FIXED
+// ✅ Existing VM UI (stopped)
 // ==================================================
 function renderStoppedVmChoices(vmInfo, _accessToken) {
-  // NOTE: _accessToken param is kept for API compat but we always fetch fresh below
   const statusMessage = document.getElementById("status-message");
   const allocateBtn = document.getElementById("allocate-btn");
   if (!statusMessage) return;
@@ -520,7 +526,6 @@ function renderStoppedVmChoices(vmInfo, _accessToken) {
     </div>
   `;
 
-  // ✅ Capture vm_id in closure NOW — never read from global/localStorage at click time
   const capturedVmId = vmInfo.vm_id;
 
   function setMsg(text, color) {
@@ -542,36 +547,27 @@ function renderStoppedVmChoices(vmInfo, _accessToken) {
     if (n) n.disabled = false;
   }
 
-  // ✅ Always fetch a fresh token at click time
-  async function getFreshToken() {
-    try {
-      const sb = await getSb();
-      if (sb) {
-        const { data: { session } } = await sb.auth.getSession();
-        if (session?.access_token) {
-          localStorage.setItem("sb_access_token", session.access_token);
-          return session.access_token;
-        }
-      }
-    } catch (e) {
-      console.warn("getSession failed, falling back to localStorage:", e);
-    }
-    const stored = localStorage.getItem("sb_access_token");
-    if (stored) return stored;
-    throw new Error("No auth token. Please log out and log back in.");
+  // ✅ Use global hardened token getter everywhere + never hang forever
+  async function getFreshTokenFast() {
+    return await withTimeout(getFreshAccessToken(), 15000, "token fetch");
   }
 
   document.getElementById("resume-vm-btn").onclick = async function () {
     console.log("▶️ Resume clicked, vm_id:", capturedVmId);
     try {
       disableBtns();
-      setMsg("⏳ Authenticating...");
+      setMsg("⏳ Authenticating (first load may take a moment)...");
 
-      const token = await getFreshToken();
-      console.log("▶️ Token obtained, calling start_vm...");
+      let token;
+      try {
+        token = await getFreshTokenFast();
+      } catch {
+        throw new Error("Auth not ready yet. Wait 2–3 seconds and click Resume again (or refresh).");
+      }
+
       setMsg("⏳ Requesting resume (may take a few minutes)...");
-
       const base = await apiBase();
+
       try {
         await fetchJsonWithTimeout(`${base}/start_vm`, {
           method: "POST",
@@ -582,7 +578,6 @@ function renderStoppedVmChoices(vmInfo, _accessToken) {
           body: JSON.stringify({ vm_id: capturedVmId }),
         }, 25000);
       } catch (e) {
-        // A timeout here is normal — the VM starts async
         if (!isTimeoutMessage(e)) throw e;
         console.warn("start_vm timed out (expected for async start), continuing to poll...");
       }
@@ -598,7 +593,6 @@ function renderStoppedVmChoices(vmInfo, _accessToken) {
       setMsg("✅ VM is running! Opening dashboard...", "lightgreen");
       await sleep(600);
       window.location.href = "/status";
-
     } catch (e) {
       console.error("Resume failed:", e);
       setMsg(`❌ Resume failed: ${e.message || e}`, "crimson");
@@ -615,13 +609,18 @@ function renderStoppedVmChoices(vmInfo, _accessToken) {
 
     try {
       disableBtns();
-      setMsg("⏳ Authenticating...");
+      setMsg("⏳ Authenticating (first load may take a moment)...");
 
-      const token = await getFreshToken();
-      console.log("🗑️ Token obtained, calling terminate_vm...");
+      let token;
+      try {
+        token = await getFreshTokenFast();
+      } catch {
+        throw new Error("Auth not ready yet. Wait 2–3 seconds and try again (or refresh).");
+      }
+
       setMsg("⏳ Terminating old VM...");
-
       const base = await apiBase();
+
       await fetchJsonWithTimeout(`${base}/terminate_vm`, {
         method: "POST",
         headers: {
@@ -636,7 +635,6 @@ function renderStoppedVmChoices(vmInfo, _accessToken) {
 
       if (allocateBtn) allocateBtn.style.display = "inline-block";
       setMsg("✅ Old VM terminated. Click Allocate to create a new instance.", "lightgreen");
-
     } catch (e) {
       console.error("Terminate failed:", e);
       setMsg(`❌ Terminate failed: ${e.message || e}`, "crimson");
@@ -817,6 +815,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (window.location.pathname.toLowerCase() === "/allocate") {
     await updateAllocateGate();
     startAgentGatePolling();
+    // Prime token on initial load too
+    try { await getFreshAccessToken(); } catch {}
   }
 
   sb.auth.onAuthStateChange(async () => {
@@ -824,6 +824,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (window.location.pathname.toLowerCase() === "/allocate") {
       await updateAllocateGate();
       startAgentGatePolling();
+      try { await getFreshAccessToken(); } catch {}
     }
   });
 
