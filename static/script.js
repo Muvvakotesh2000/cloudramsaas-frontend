@@ -1,82 +1,49 @@
-// frontend/static/script.js (FULL FILE — FINAL FIX: Allocate always works, no refresh needed)
-// ✅ Fixes:
-//   1) Inline onclick fallback needs window.allocateClickFlow (we export it)
-//   2) Supabase getSession can time out -> allocation flow stalls (we add timeout + retries + localStorage fallback)
-//   3) Binding is made reliable (bind on allocate page show + delegation fallback)
-//
-// NOTE: This does NOT remove your features. It only hardens auth + click.
-
+// frontend/static/script.js
 console.log("✅ script.js loaded");
 
 // ==================================================
-// ✅ BASE URLS
+// BASE URLS
 // ==================================================
 async function apiBase() {
   const cfg = await window.loadAppConfig();
   return (cfg.API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 }
-
-function agentBase() {
-  return "http://127.0.0.1:7071";
-}
+function agentBase() { return "http://127.0.0.1:7071"; }
 
 const AGENT_ZIP_URL =
   "https://github.com/Muvvakotesh2000/cloudramsaas-LocalAgent/archive/refs/heads/main.zip";
 
 // ==================================================
-// ✅ Helpers
+// Helpers
 // ==================================================
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function isAbortError(e) {
-  return e?.name === "AbortError" || String(e).toLowerCase().includes("aborted");
-}
-
-function isTimeoutMessage(e) {
-  return String(e?.message || e || "").toLowerCase().includes("timed out");
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function isAbortError(e) { return e?.name === "AbortError" || String(e).toLowerCase().includes("aborted"); }
+function isTimeoutMsg(e) { return String(e?.message || e || "").toLowerCase().includes("timed out"); }
 
 async function withTimeout(promise, ms, msg) {
   let t;
-  const timeout = new Promise((_, rej) => {
-    t = setTimeout(() => rej(new Error(msg || `Timed out after ${ms}ms`)), ms);
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(t);
-  }
+  const tout = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(msg || `Timed out after ${ms}ms`)), ms); });
+  try { return await Promise.race([promise, tout]); } finally { clearTimeout(t); }
 }
 
-async function fetchWithTimeout(url, opts = {}, timeoutMs = 30000) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...opts, signal: controller.signal });
-  } finally {
-    clearTimeout(t);
-  }
+async function fetchWithTimeout(url, opts = {}, ms = 30000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctrl.signal }); } finally { clearTimeout(t); }
 }
 
-async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 30000) {
+async function fetchJsonWithTimeout(url, opts = {}, ms = 30000) {
   try {
-    const r = await fetchWithTimeout(url, opts, timeoutMs);
+    const r = await fetchWithTimeout(url, opts, ms);
     const text = await r.text();
-
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
+    let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
     if (!r.ok) {
       const detail = data?.detail ?? data?.error ?? data?.message ?? data?.raw ?? `HTTP ${r.status}`;
       throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     }
     return data;
   } catch (e) {
-    if (isAbortError(e)) {
-      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
-    }
+    if (isAbortError(e)) throw new Error(`Request timed out after ${Math.round(ms / 1000)}s.`);
     throw e;
   }
 }
@@ -85,12 +52,9 @@ async function isAgentOnline() {
   try {
     const r = await fetchWithTimeout(`${agentBase()}/health`, { cache: "no-store" }, 2500);
     return r.ok;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-// Clipboard copy that always gives user a way to copy
 async function copyTextReliable(text) {
   try {
     if (navigator.clipboard && window.isSecureContext) {
@@ -98,133 +62,88 @@ async function copyTextReliable(text) {
       return { ok: true, method: "clipboard" };
     }
   } catch {}
-
   try {
     const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.left = "-9999px";
-    ta.style.top = "-9999px";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
+    ta.value = text; ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;left:-9999px;top:-9999px";
+    document.body.appendChild(ta); ta.focus(); ta.select();
     ta.setSelectionRange(0, ta.value.length);
     const ok = document.execCommand("copy");
     document.body.removeChild(ta);
     if (ok) return { ok: true, method: "execCommand" };
   } catch {}
-
-  try {
-    window.prompt("Copy this command:", text);
-    return { ok: true, method: "prompt" };
-  } catch {
-    return { ok: false, method: "none" };
-  }
+  try { window.prompt("Copy this command:", text); return { ok: true, method: "prompt" }; } catch {}
+  return { ok: false, method: "none" };
 }
 
 // ==================================================
-// ✅ Supabase (Hardened: session timeout safe)
+// Supabase
 // ==================================================
 async function getSb() {
   if (window._sbClient) return window._sbClient;
   const cfg = await window.loadAppConfig();
-  if (!window.supabase || !window.supabase.createClient) {
-    console.error("❌ Supabase SDK not loaded. Check index.html script order.");
-    return null;
-  }
+  if (!window.supabase?.createClient) { console.error("❌ Supabase SDK not loaded"); return null; }
   window._sbClient = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
   return window._sbClient;
 }
 
-// ✅ resilient token fetch: retry + timeout + localStorage fallback
 async function getAccessTokenResilient() {
-  // 1) try supabase session a few times (sometimes it cold-starts / times out)
   try {
     const sb = await getSb();
     if (sb) {
       for (let i = 1; i <= 5; i++) {
         try {
-          const { data } = await withTimeout(
-            sb.auth.getSession(),
-            12000,
-            "Supabase getSession() timed out after 12s"
-          );
+          const { data } = await withTimeout(sb.auth.getSession(), 12000, "getSession timed out");
           const token = data?.session?.access_token;
-          if (token) {
-            localStorage.setItem("sb_access_token", token);
-            return token;
-          }
-        } catch (e) {
-          // retry
-          await sleep(600 * i);
-        }
+          if (token) { localStorage.setItem("sb_access_token", token); return token; }
+        } catch { await sleep(600 * i); }
       }
     }
   } catch {}
-
-  // 2) fallback localStorage
   const ls = localStorage.getItem("sb_access_token");
   if (ls) return ls;
-
   return "";
 }
 
 // ==================================================
-// ✅ UI helpers (Allocate page)
+// UI helpers
 // ==================================================
 function setGateStatus(ok, msg) {
-  const statusEl = document.getElementById("allocate-agent-status");
-  const allocateBtn = document.getElementById("allocate-btn");
-
-  if (statusEl) {
-    statusEl.textContent = msg || "";
-    statusEl.style.color = ok ? "lightgreen" : "crimson";
-  }
-  if (allocateBtn) allocateBtn.disabled = !ok;
+  const el  = document.getElementById("allocate-agent-status");
+  const btn = document.getElementById("allocate-btn");
+  if (el) { el.textContent = msg || ""; el.style.color = ok ? "lightgreen" : "crimson"; }
+  if (btn) btn.disabled = !ok;
 }
 
-function setAllocateBusy(isBusy, msg = "") {
-  const loadingText = document.getElementById("loading-text");
-  const statusMessage = document.getElementById("status-message");
-  const allocateBtn = document.getElementById("allocate-btn");
+function setAllocateBusy(busy, msg = "") {
+  const loadingText  = document.getElementById("loading-text");
+  const statusMsg    = document.getElementById("status-message");
+  const btn          = document.getElementById("allocate-btn");
 
-  if (allocateBtn) allocateBtn.disabled = !!isBusy;
-
-  if (loadingText) {
-    loadingText.style.display = isBusy ? "block" : "none";
-    if (msg) loadingText.textContent = msg;
-  }
-
-  if (statusMessage && msg) {
-    statusMessage.style.color = "white";
-    statusMessage.textContent = msg;
-  }
+  if (btn) btn.disabled = !!busy;
+  if (loadingText) { loadingText.style.display = busy ? "block" : "none"; if (msg) loadingText.textContent = msg; }
+  if (statusMsg && msg) { statusMsg.style.color = "white"; statusMsg.textContent = msg; }
 }
 
 async function updateAllocateGate() {
-  const ok = await isAgentOnline();
+  const ok  = await isAgentOnline();
+  const btn = document.getElementById("allocate-btn");
   if (ok) setGateStatus(true, "✅ Local Agent is running. Click Allocate to continue.");
-  else setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
-
-  const allocateBtn = document.getElementById("allocate-btn");
-  if (allocateBtn) allocateBtn.style.display = "inline-block";
+  else    setGateStatus(false, "❌ Local Agent is NOT running. Install & Run it, then click Retry Agent.");
+  if (btn) btn.style.display = "inline-block";
 }
 
-// ✅ Poll agent for a short period (helps on refresh/slow startup)
 let _agentPollTimer = null;
 function startAgentGatePolling() {
   if (_agentPollTimer) return;
   _agentPollTimer = setInterval(async () => {
     if (window.location.pathname.toLowerCase() !== "/allocate") return;
-
-    const ok = await isAgentOnline();
-    const allocateBtn = document.getElementById("allocate-btn");
-
+    const ok  = await isAgentOnline();
+    const btn = document.getElementById("allocate-btn");
     if (ok) {
-      if (allocateBtn && allocateBtn.disabled && document.getElementById("loading-text")?.style.display !== "block") {
-        setGateStatus(true, "✅ Local Agent is running. Click Allocate to continue.");
-      }
+      setGateStatus(true, "✅ Local Agent is running. Click Allocate to continue.");
+      // ✅ Re-bind in case the page DOM shifted while polling
+      attachAllocateBtn();
       clearInterval(_agentPollTimer);
       _agentPollTimer = null;
     }
@@ -232,7 +151,7 @@ function startAgentGatePolling() {
 }
 
 // ==================================================
-// ✅ Local Agent install/run commands
+// Install/Run commands
 // ==================================================
 function buildInstallCommand() {
   return [
@@ -244,16 +163,13 @@ function buildInstallCommand() {
     'Write-Host "Extracting..."',
     'Expand-Archive -Path "$env:TEMP\\LocalAgent.zip" -DestinationPath $dest -Force',
     '$root=Get-ChildItem $dest | Where-Object {$_.PSIsContainer} | Select-Object -First 1',
-    'if (-not $root) { throw "Could not find extracted folder inside destination." }',
+    'if (-not $root) { throw "Could not find extracted folder." }',
     'Set-Location $root.FullName',
-    'Write-Host "Creating venv..."',
-    'python -m venv .venv',
-    'Write-Host "Installing requirements..."',
-    '.\\.venv\\Scripts\\pip.exe install -r requirements.txt',
-    'Write-Host "✅ Install complete. Next: run the agent."',
+    'Write-Host "Creating venv..."', 'python -m venv .venv',
+    'Write-Host "Installing requirements..."', '.\\.venv\\Scripts\\pip.exe install -r requirements.txt',
+    'Write-Host "✅ Install complete."',
   ].join(" ; ");
 }
-
 function buildRunCommand() {
   return [
     '$ErrorActionPreference="Stop"',
@@ -264,18 +180,13 @@ function buildRunCommand() {
     '.\\.venv\\Scripts\\python.exe agent_main.py',
   ].join(" ; ");
 }
-
-function buildInstallAndRunCommand() {
-  return `${buildInstallCommand()} ; ${buildRunCommand()}`;
-}
+function buildInstallAndRunCommand() { return `${buildInstallCommand()} ; ${buildRunCommand()}`; }
 
 // ==================================================
-// ✅ SPA Navigation
+// SPA Navigation
 // ==================================================
 function navigate(page, pushState = true) {
-  const pages = ["login-page", "register-page", "home-page", "allocate-page"];
-
-  pages.forEach((p) => {
+  ["login-page","register-page","home-page","allocate-page"].forEach(p => {
     const el = document.getElementById(p);
     if (el) el.style.display = "none";
   });
@@ -287,43 +198,77 @@ function navigate(page, pushState = true) {
   if (nav) nav.style.display = (page === "login" || page === "register") ? "none" : "block";
 
   if (pushState) {
-    const newPath =
-      page === "login" ? "/login" :
-      page === "register" ? "/register" :
-      page === "home" ? "/" :
-      page === "allocate" ? "/allocate" : "/";
-    window.history.pushState({}, "", newPath);
+    const paths = { login:"/login", register:"/register", home:"/", allocate:"/allocate" };
+    window.history.pushState({}, "", paths[page] || "/");
   }
 
   if (page === "allocate") {
     setTimeout(async () => {
-      bindAllocateButton();      // ✅ important
+      attachAllocateBtn();       // ✅ always attach fresh
       await updateAllocateGate();
       startAgentGatePolling();
-
-      const statusMessage = document.getElementById("status-message");
-      if (statusMessage) {
-        statusMessage.style.color = "white";
-        statusMessage.textContent =
-          "Click Allocate to check existing VM (running/stopped) or create a new VM.";
-      }
+      const sm = document.getElementById("status-message");
+      if (sm) { sm.style.color = "white"; sm.textContent = "Click Allocate to check existing VM or create a new VM."; }
     }, 0);
   }
 }
 
 function routeByPath() {
-  const path = window.location.pathname.toLowerCase();
-  if (path === "/register") return navigate("register", false);
-  if (path === "/login") return navigate("login", false);
-  if (path === "/allocate") return navigate("allocate", false);
-  if (path === "/") return navigate("home", false);
+  const p = window.location.pathname.toLowerCase();
+  if (p === "/register") return navigate("register", false);
+  if (p === "/login")    return navigate("login",    false);
+  if (p === "/allocate") return navigate("allocate", false);
+  if (p === "/")         return navigate("home",     false);
   return navigate("login", false);
 }
-
 window.navigate = navigate;
 
 // ==================================================
-// ✅ Session-aware UI refresh (hardened)
+// ✅ Allocate button — reliable single attach
+// Uses a WeakMap flag instead of dataset so it survives cloneNode scenarios
+// and works even if the element is the same node re-shown.
+// ==================================================
+const _btnBound = new WeakSet();
+
+function attachAllocateBtn() {
+  const btn = document.getElementById("allocate-btn");
+  if (!btn) { console.warn("attachAllocateBtn: #allocate-btn not in DOM"); return; }
+  if (_btnBound.has(btn)) { console.log("allocate-btn already bound, skipping"); return; }
+
+  _btnBound.add(btn);
+  btn.addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await allocateClickFlow();
+  });
+  console.log("✅ allocate-btn bound");
+}
+
+// Delegation fallback — catches clicks even if attachAllocateBtn missed
+let _delegateBound = false;
+function bindAllocateDelegationFallback() {
+  if (_delegateBound) return;
+  _delegateBound = true;
+  document.addEventListener("click", async (e) => {
+    const btn = e.target?.closest?.("#allocate-btn");
+    if (!btn || btn.disabled) return;
+    // If already properly bound, the above listener fires first.
+    // This only catches cases where binding was missed entirely.
+    if (!_btnBound.has(btn)) {
+      e.preventDefault(); e.stopPropagation();
+      console.log("🛟 Delegation fallback caught #allocate-btn click");
+      await allocateClickFlow();
+    }
+  }, true);
+}
+
+// Expose for inline onclick fallback (legacy safety)
+window.allocateClickFlow = allocateClickFlow;
+// Expose attach so polling can re-call it
+window.attachAllocateBtn = attachAllocateBtn;
+
+// ==================================================
+// Session-aware UI
 // ==================================================
 async function refreshUIForSession() {
   const sb = await getSb();
@@ -336,58 +281,42 @@ async function refreshUIForSession() {
     if (p !== "/login" && p !== "/register") navigate("login", false);
     return;
   }
-
-  // token exists -> show correct page
   localStorage.setItem("sb_access_token", token);
 
   const path = window.location.pathname.toLowerCase();
-  if (path === "/allocate") navigate("allocate", false);
-  else if (path === "/") navigate("home", false);
-  else if (path === "/login") navigate("login", false);
+  if      (path === "/allocate") navigate("allocate", false);
+  else if (path === "/")         navigate("home",     false);
+  else if (path === "/login")    navigate("login",    false);
   else if (path === "/register") navigate("register", false);
-  else navigate("home", false);
+  else                           navigate("home",     false);
 
-  // try to show email (best effort)
   try {
-    const { data: { user } } = await withTimeout(sb.auth.getUser(), 10000, "Supabase getUser() timed out after 10s");
-    const userEmailEl = document.getElementById("user-email");
-    if (userEmailEl && user?.email) userEmailEl.textContent = `Logged in as: ${user.email}`;
+    const { data: { user } } = await withTimeout(sb.auth.getUser(), 10000, "getUser timed out");
+    const el = document.getElementById("user-email");
+    if (el && user?.email) el.textContent = `Logged in as: ${user.email}`;
   } catch {}
 }
 
 // ==================================================
-// ✅ Auth functions (GLOBAL)
+// Auth functions
 // ==================================================
 async function registerUser() {
   const sb = await getSb();
   const errorEl = document.getElementById("register-error");
   if (errorEl) errorEl.textContent = "";
-  if (!sb) {
-    if (errorEl) errorEl.textContent = "Supabase not initialized.";
-    return;
-  }
+  if (!sb) { if (errorEl) errorEl.textContent = "Supabase not initialized."; return; }
 
   const firstName = document.getElementById("register-firstname").value.trim();
-  const lastName = document.getElementById("register-lastname").value.trim();
-  const phone = document.getElementById("register-phone").value.trim();
-  const email = document.getElementById("register-email").value.trim();
-  const password = document.getElementById("register-password").value;
+  const lastName  = document.getElementById("register-lastname").value.trim();
+  const phone     = document.getElementById("register-phone").value.trim();
+  const email     = document.getElementById("register-email").value.trim();
+  const password  = document.getElementById("register-password").value;
 
-  const { error } = await sb.auth.signUp({
-    email,
-    password,
-    options: {
-      data: { first_name: firstName, last_name: lastName, phone },
-      emailRedirectTo: window.location.origin + "/callback",
-    },
-  });
-
-  if (error) {
-    if (errorEl) errorEl.textContent = error.message;
-    return;
-  }
-
-  alert("Registration successful! Check your email to confirm (if enabled).");
+  const { error } = await sb.auth.signUp({ email, password,
+    options: { data: { first_name: firstName, last_name: lastName, phone },
+               emailRedirectTo: window.location.origin + "/callback" } });
+  if (error) { if (errorEl) errorEl.textContent = error.message; return; }
+  alert("Registration successful! Check your email to confirm.");
   navigate("login");
 }
 
@@ -395,44 +324,26 @@ async function login() {
   const sb = await getSb();
   const errorEl = document.getElementById("login-error");
   if (errorEl) errorEl.textContent = "";
-  if (!sb) {
-    if (errorEl) errorEl.textContent = "Supabase not initialized.";
-    return;
-  }
+  if (!sb) { if (errorEl) errorEl.textContent = "Supabase not initialized."; return; }
 
-  const email = document.getElementById("login-email").value.trim();
+  const email    = document.getElementById("login-email").value.trim();
   const password = document.getElementById("login-password").value;
 
   try {
     const { data, error } = await sb.auth.signInWithPassword({ email, password });
-    if (error) {
-      if (errorEl) errorEl.textContent = error.message;
-      return;
-    }
+    if (error) { if (errorEl) errorEl.textContent = error.message; return; }
     if (data?.session?.access_token) localStorage.setItem("sb_access_token", data.session.access_token);
-
-    const path = window.location.pathname.toLowerCase();
-    if (path === "/allocate") navigate("allocate");
-    else navigate("home");
-  } catch (e) {
-    if (errorEl) errorEl.textContent = "Unexpected login error. Check console.";
-  }
+    navigate(window.location.pathname.toLowerCase() === "/allocate" ? "allocate" : "home");
+  } catch { if (errorEl) errorEl.textContent = "Unexpected login error. Check console."; }
 }
 
 async function loginWithGoogle() {
   const sb = await getSb();
   const errorEl = document.getElementById("login-error");
   if (errorEl) errorEl.textContent = "";
-  if (!sb) {
-    if (errorEl) errorEl.textContent = "Supabase not initialized.";
-    return;
-  }
-
-  const { error } = await sb.auth.signInWithOAuth({
-    provider: "google",
-    options: { redirectTo: window.location.origin + "/callback" },
-  });
-
+  if (!sb) { if (errorEl) errorEl.textContent = "Supabase not initialized."; return; }
+  const { error } = await sb.auth.signInWithOAuth({ provider: "google",
+    options: { redirectTo: window.location.origin + "/callback" } });
   if (error && errorEl) errorEl.textContent = error.message;
 }
 
@@ -445,72 +356,56 @@ async function logout() {
   navigate("login");
 }
 
-window.registerUser = registerUser;
-window.login = login;
+window.registerUser   = registerUser;
+window.login          = login;
 window.loginWithGoogle = loginWithGoogle;
-window.logout = logout;
+window.logout         = logout;
 
 // ==================================================
-// ✅ VM polling (timeout-tolerant)
+// VM polling
 // ==================================================
-async function pollVmUntilRunning(accessToken, {
-  maxMinutes = 15,
-  intervalMs = 5000,
-  requestTimeoutMs = 90000,
-  statusPrefix = "⏳"
-} = {}) {
-  const base = await apiBase();
-  const url = `${base}/my_vm`;
+async function pollVmUntilRunning(accessToken, { maxMinutes = 15, intervalMs = 5000, requestTimeoutMs = 90000, statusPrefix = "⏳" } = {}) {
+  const base   = await apiBase();
+  const url    = `${base}/my_vm`;
   const headers = { "Authorization": `Bearer ${accessToken}` };
-
-  const endAt = Date.now() + maxMinutes * 60 * 1000;
-  let attempt = 0;
+  const endAt  = Date.now() + maxMinutes * 60 * 1000;
+  let attempt  = 0;
 
   while (Date.now() < endAt) {
-    attempt += 1;
-
+    attempt++;
     let info = null;
     try {
       info = await fetchJsonWithTimeout(url, { headers }, requestTimeoutMs);
     } catch (e) {
-      if (isTimeoutMessage(e)) {
+      if (isTimeoutMsg(e)) {
         const sm = document.getElementById("status-message");
-        if (sm) {
-          sm.style.color = "white";
-          sm.textContent = `${statusPrefix} Network slow / backend cold start. Retrying... (attempt ${attempt})`;
-        }
-        await sleep(intervalMs);
-        continue;
+        if (sm) { sm.style.color = "white"; sm.textContent = `${statusPrefix} Network slow. Retrying... (attempt ${attempt})`; }
+        await sleep(intervalMs); continue;
       }
       throw e;
     }
 
     if (info?.vm_id) localStorage.setItem("vm_id", info.vm_id);
-    if (info?.ip) localStorage.setItem("vm_ip", info.ip);
+    if (info?.ip)    localStorage.setItem("vm_ip", info.ip);
 
     const sm = document.getElementById("status-message");
-    if (sm) {
-      sm.style.color = "white";
-      sm.textContent = `${statusPrefix} Waiting... state=${info.state || "unknown"} (attempt ${attempt})`;
-    }
+    if (sm) { sm.style.color = "white"; sm.textContent = `${statusPrefix} state=${info.state || "unknown"} (attempt ${attempt})`; }
 
-    if (!info.exists) throw new Error("No VM found while waiting. Please click Allocate again.");
+    if (!info.exists) throw new Error("No VM found. Click Allocate again.");
     if (info.state === "running" && info.ip) return info;
 
     await sleep(intervalMs);
   }
-
   throw new Error("VM is taking longer than expected. Please wait and try again.");
 }
 
 // ==================================================
-// ✅ Existing VM UI (stopped)
+// Stopped VM choices (Allocate page)
 // ==================================================
 function renderStoppedVmChoices(vmInfo, accessToken) {
   const statusMessage = document.getElementById("status-message");
-  const allocateBtn = document.getElementById("allocate-btn");
+  const allocateBtn   = document.getElementById("allocate-btn");
   if (!statusMessage) return;
-
   if (allocateBtn) allocateBtn.style.display = "none";
 
   statusMessage.style.color = "white";
@@ -519,281 +414,151 @@ function renderStoppedVmChoices(vmInfo, accessToken) {
       <div style="font-weight:bold;">🟡 Existing VM is STOPPED.</div>
       <div style="margin-top:6px;">VM ID: ${vmInfo.vm_id}</div>
       <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <button id="resume-vm-btn" type="button" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#00c4cc; color:white;">
+        <button id="resume-vm-btn" type="button" style="padding:10px 14px;border-radius:6px;border:none;cursor:pointer;background:#00c4cc;color:white;">
           Resume stopped instance
         </button>
-        <button id="new-vm-btn" type="button" style="padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#ff5b5b; color:white;">
+        <button id="new-vm-btn" type="button" style="padding:10px 14px;border-radius:6px;border:none;cursor:pointer;background:#ff5b5b;color:white;">
           Create new instance (terminate old)
         </button>
       </div>
-      <div style="margin-top:10px; font-size:13px; opacity:0.95;">
-        Creating a new instance will terminate the old one and data will be lost permanently.
+      <div style="margin-top:10px;font-size:13px;opacity:0.95;">
+        Creating a new instance will terminate the old one — data will be lost permanently.
       </div>
-    </div>
-  `;
+    </div>`;
 
-  const resumeBtn = document.getElementById("resume-vm-btn");
-  const newBtn = document.getElementById("new-vm-btn");
-
-  if (resumeBtn) {
-    resumeBtn.addEventListener("click", async () => {
+  // ✅ Bind immediately after injecting HTML — no cloning needed
+  document.getElementById("resume-vm-btn")?.addEventListener("click", async () => {
+    try {
+      setAllocateBusy(true, "Requesting resume (can take several minutes)...");
+      const base = await apiBase();
       try {
-        setAllocateBusy(true, "Requesting resume (this can take several minutes)...");
-
-        const base = await apiBase();
-
-        try {
-          await fetchJsonWithTimeout(`${base}/start_vm`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${accessToken}`,
-            },
-            body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-          }, 25000);
-        } catch (e) {
-          if (!isTimeoutMessage(e)) throw e;
-          const sm = document.getElementById("status-message");
-          if (sm) {
-            sm.style.color = "white";
-            sm.textContent = "⏳ Resume requested. Waiting for VM to become RUNNING and get an IP...";
-          }
-        }
-
-        await pollVmUntilRunning(accessToken, {
-          maxMinutes: 15,
-          intervalMs: 5000,
-          requestTimeoutMs: 90000,
-          statusPrefix: "⏳ Resuming:"
-        });
-
-        window.location.href = "/status";
-      } catch (e) {
-        const sm = document.getElementById("status-message");
-        if (sm) {
-          sm.style.color = "crimson";
-          sm.textContent = `❌ Resume failed: ${e.message || e}`;
-        }
-      } finally {
-        setAllocateBusy(false);
-        await updateAllocateGate();
-      }
-    });
-  }
-
-  if (newBtn) {
-    newBtn.addEventListener("click", async () => {
-      const ok = confirm(
-        "Creating a new instance will TERMINATE your old instance and ALL data on it will be lost permanently. Continue?"
-      );
-      if (!ok) return;
-
-      try {
-        setAllocateBusy(true, "Terminating old VM...");
-
-        const base = await apiBase();
-        await fetchJsonWithTimeout(`${base}/terminate_vm`, {
+        await fetchJsonWithTimeout(`${base}/start_vm`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${accessToken}`,
-          },
-          body: JSON.stringify({ vm_id: vmInfo.vm_id }),
-        }, 90000);
-
-        if (allocateBtn) allocateBtn.style.display = "inline-block";
-
-        statusMessage.style.color = "white";
-        statusMessage.textContent = "✅ Old VM terminated. Click Allocate again to create a new instance.";
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${accessToken}` },
+          body: JSON.stringify({ vm_id: vmInfo.vm_id })
+        }, 25000);
       } catch (e) {
-        statusMessage.style.color = "crimson";
-        statusMessage.textContent = `❌ Could not terminate old VM: ${e.message || e}`;
-      } finally {
-        setAllocateBusy(false);
-        await updateAllocateGate();
+        if (!isTimeoutMsg(e)) throw e;
+        const sm = document.getElementById("status-message");
+        if (sm) { sm.style.color = "white"; sm.textContent = "⏳ Resume requested. Waiting for VM to become RUNNING..."; }
       }
-    });
-  }
+      await pollVmUntilRunning(accessToken, { maxMinutes: 15, intervalMs: 5000, requestTimeoutMs: 90000, statusPrefix: "⏳ Resuming:" });
+      window.location.href = "/status";
+    } catch (e) {
+      const sm = document.getElementById("status-message");
+      if (sm) { sm.style.color = "crimson"; sm.textContent = `❌ Resume failed: ${e.message || e}`; }
+    } finally {
+      setAllocateBusy(false);
+      await updateAllocateGate();
+    }
+  });
+
+  document.getElementById("new-vm-btn")?.addEventListener("click", async () => {
+    if (!confirm("Creating a new instance will TERMINATE your old instance and ALL data will be lost permanently. Continue?")) return;
+    try {
+      setAllocateBusy(true, "Terminating old VM...");
+      const base = await apiBase();
+      await fetchJsonWithTimeout(`${base}/terminate_vm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${accessToken}` },
+        body: JSON.stringify({ vm_id: vmInfo.vm_id })
+      }, 90000);
+      if (allocateBtn) allocateBtn.style.display = "inline-block";
+      statusMessage.style.color = "white";
+      statusMessage.textContent = "✅ Old VM terminated. Click Allocate to create a new instance.";
+    } catch (e) {
+      statusMessage.style.color = "crimson";
+      statusMessage.textContent = `❌ Could not terminate: ${e.message || e}`;
+    } finally {
+      setAllocateBusy(false);
+      await updateAllocateGate();
+    }
+  });
 }
 
 // ==================================================
-// ✅ Allocate Click Flow
+// Allocate Click Flow
 // ==================================================
-async function getMyVmInfo(accessToken) {
-  const base = await apiBase();
-  return await fetchJsonWithTimeout(`${base}/my_vm`, {
-    headers: { "Authorization": `Bearer ${accessToken}` }
-  }, 90000);
-}
-
 async function allocateClickFlow() {
-  console.log("✅ Click received. Starting allocation flow...");
-
+  console.log("✅ allocateClickFlow started");
   const statusMessage = document.getElementById("status-message");
   const ramSize = parseInt(document.getElementById("ram")?.value || "1", 10);
 
   try {
-    if (statusMessage) {
-      statusMessage.style.color = "white";
-      statusMessage.textContent = "";
-    }
+    if (statusMessage) { statusMessage.style.color = "white"; statusMessage.textContent = ""; }
 
     const agentOk = await isAgentOnline();
     if (!agentOk) {
-      setGateStatus(false, "❌ Local Agent is NOT running. Click Install & Run Agent, then Retry Agent.");
-      if (statusMessage) {
-        statusMessage.style.color = "crimson";
-        statusMessage.textContent = "Start Local Agent first. Allocate is disabled until Agent is running.";
-      }
+      setGateStatus(false, "❌ Local Agent is NOT running. Install & Run it, then click Retry Agent.");
+      if (statusMessage) { statusMessage.style.color = "crimson"; statusMessage.textContent = "Start Local Agent first."; }
       startAgentGatePolling();
       return;
     }
 
-    // ✅ hardened token retrieval (no hanging getSession)
     const accessToken = await getAccessTokenResilient();
     if (!accessToken) {
-      if (statusMessage) {
-        statusMessage.style.color = "crimson";
-        statusMessage.textContent = "❌ Session not ready. Please login again.";
-      }
-      navigate("login");
-      return;
+      if (statusMessage) { statusMessage.style.color = "crimson"; statusMessage.textContent = "❌ Session not ready. Please login again."; }
+      navigate("login"); return;
     }
     localStorage.setItem("sb_access_token", accessToken);
 
     setAllocateBusy(true, "Checking existing VM...");
 
-    // ✅ This was the step you said it doesn't reach — now it will or show error.
-    const info = await getMyVmInfo(accessToken);
+    const base = await apiBase();
+    const info = await fetchJsonWithTimeout(`${base}/my_vm`, {
+      headers: { "Authorization": `Bearer ${accessToken}` }
+    }, 90000);
 
     if (info?.vm_id) localStorage.setItem("vm_id", info.vm_id);
-    if (info?.ip) localStorage.setItem("vm_ip", info.ip);
+    if (info?.ip)    localStorage.setItem("vm_ip", info.ip);
 
     if (info?.exists) {
       if (info.state === "running" && info.ip) {
-        if (statusMessage) {
-          statusMessage.style.color = "lightgreen";
-          statusMessage.textContent = `✅ VM is already RUNNING (${info.ip}). Opening dashboard...`;
-        }
-        await sleep(350);
-        window.location.href = "/status";
-        return;
+        if (statusMessage) { statusMessage.style.color = "lightgreen"; statusMessage.textContent = `✅ VM already RUNNING (${info.ip}). Opening dashboard...`; }
+        await sleep(350); window.location.href = "/status"; return;
       }
-
       if (info.state === "stopped" || info.state === "stopping") {
         setAllocateBusy(false);
         renderStoppedVmChoices(info, accessToken);
         return;
       }
-
-      if (statusMessage) {
-        statusMessage.style.color = "white";
-        statusMessage.textContent = `⏳ Existing VM found in state: ${info.state}. Please wait and try again.`;
-      }
+      if (statusMessage) { statusMessage.style.color = "white"; statusMessage.textContent = `⏳ VM in state: ${info.state}. Please wait and try again.`; }
       return;
     }
 
-    setAllocateBusy(true, "Allocating new VM (can take 10–15 minutes)...");
-
-    const base = await apiBase();
-
+    setAllocateBusy(true, "Allocating new VM (can take 10–15 min)...");
     try {
       await fetchJsonWithTimeout(`${base}/allocate`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({ ram_size: ramSize }),
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${accessToken}` },
+        body: JSON.stringify({ ram_size: ramSize })
       }, 25000);
     } catch (e) {
-      if (!isTimeoutMessage(e)) throw e;
-      if (statusMessage) {
-        statusMessage.style.color = "white";
-        statusMessage.textContent = "⏳ Allocation requested. Waiting for VM to become RUNNING and get an IP...";
-      }
+      if (!isTimeoutMsg(e)) throw e;
+      if (statusMessage) { statusMessage.style.color = "white"; statusMessage.textContent = "⏳ Allocation requested. Waiting for VM..."; }
     }
 
-    await pollVmUntilRunning(accessToken, {
-      maxMinutes: 15,
-      intervalMs: 5000,
-      requestTimeoutMs: 90000,
-      statusPrefix: "⏳ Allocating:"
-    });
+    await pollVmUntilRunning(accessToken, { maxMinutes: 15, intervalMs: 5000, requestTimeoutMs: 90000, statusPrefix: "⏳ Allocating:" });
 
-    if (statusMessage) {
-      statusMessage.style.color = "lightgreen";
-      statusMessage.textContent = "✅ VM is ready. Opening dashboard...";
-    }
+    if (statusMessage) { statusMessage.style.color = "lightgreen"; statusMessage.textContent = "✅ VM is ready. Opening dashboard..."; }
     await sleep(350);
     window.location.href = "/status";
   } catch (err) {
     console.error("allocateClickFlow error:", err);
-    if (statusMessage) {
-      statusMessage.style.color = "crimson";
-      statusMessage.textContent = `❌ ${err.message || err}`;
-    }
+    if (statusMessage) { statusMessage.style.color = "crimson"; statusMessage.textContent = `❌ ${err.message || err}`; }
   } finally {
     setAllocateBusy(false);
     await updateAllocateGate();
   }
 }
 
-// ✅ IMPORTANT: export so your inline onclick works 100%
 window.allocateClickFlow = allocateClickFlow;
 
 // ==================================================
-// ✅ Allocate button binding (reliable + delegation fallback)
-// ==================================================
-function bindAllocateButton() {
-  const allocateBtn = document.getElementById("allocate-btn");
-  if (!allocateBtn) {
-    console.warn("bindAllocateButton: #allocate-btn not found");
-    return;
-  }
-
-  if (allocateBtn.dataset.bound === "1") return;
-  allocateBtn.dataset.bound = "1";
-
-  allocateBtn.addEventListener("click", async (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    await allocateClickFlow();
-  });
-
-  console.log("✅ Bound click handler to #allocate-btn");
-}
-
-let _delegateBound = false;
-function bindAllocateDelegationFallback() {
-  if (_delegateBound) return;
-  _delegateBound = true;
-
-  document.addEventListener("click", async (e) => {
-    const t = e.target;
-    if (!(t instanceof Element)) return;
-
-    const btn = t.closest("#allocate-btn");
-    if (!btn) return;
-
-    // allow normal handler if already bound
-    if (btn.dataset.bound === "1") return;
-
-    e.preventDefault();
-    e.stopPropagation();
-    if (btn.disabled) return;
-
-    console.log("🛟 Delegation caught click on #allocate-btn");
-    await allocateClickFlow();
-  }, true);
-}
-
-// ==================================================
-// ✅ INIT
+// INIT
 // ==================================================
 document.addEventListener("DOMContentLoaded", async () => {
   routeByPath();
-
   bindAllocateDelegationFallback();
 
   const sb = await getSb();
@@ -801,7 +566,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await refreshUIForSession();
 
-  bindAllocateButton();
+  // ✅ Attach after session is resolved (DOM is stable at this point)
+  attachAllocateBtn();
 
   if (window.location.pathname.toLowerCase() === "/allocate") {
     await updateAllocateGate();
@@ -810,15 +576,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   sb.auth.onAuthStateChange(async () => {
     await refreshUIForSession();
-    bindAllocateButton();
+    attachAllocateBtn(); // re-attach in case page switched
     if (window.location.pathname.toLowerCase() === "/allocate") {
       await updateAllocateGate();
       startAgentGatePolling();
     }
   });
-
-  const allocateBtn = document.getElementById("allocate-btn");
-  if (allocateBtn) allocateBtn.addEventListener("click", allocateClickFlow);
 
   const retry = document.getElementById("allocate-agent-retry");
   if (retry) {
@@ -833,14 +596,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     installRun.addEventListener("click", async () => {
       const cmd = buildInstallAndRunCommand();
       const res = await copyTextReliable(cmd);
-
-      setGateStatus(
-        false,
+      setGateStatus(false,
         res.ok
-          ? `📋 Install & Run command copied (${res.method}). Paste into PowerShell, then click Retry Agent.`
-          : "❌ Could not copy automatically. Open console for the command."
+          ? `📋 Command copied (${res.method}). Paste into PowerShell, then click Retry Agent.`
+          : "❌ Could not copy. Open console for the command."
       );
-
       if (!res.ok) console.log("INSTALL+RUN CMD:\n", cmd);
     });
   }
