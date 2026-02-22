@@ -1,9 +1,10 @@
 // frontend/static/script.js
-// ✅ FIXES:
-//   - renderStoppedVmChoices uses global getFreshAccessToken() (no duplicate token logic)
-//   - Token is "primed" when entering /allocate to avoid first-click auth race
-//   - Resume/Terminate: token fetch has a 15s timeout so it never hangs forever
-//   - Allocate buttons via event delegation remain
+// ✅ FIXES (final):
+//   - Resume/Create buttons NEVER fail on first click due to Supabase session hydration
+//   - Adds waitForAccessToken() retry loop (up to 45s) that waits for session/token
+//   - Keeps your existing allocation flow + polling + timeouts
+//   - Keeps event delegation for Allocate button
+//   - Keeps Local Agent gating
 
 console.log("✅ script.js loaded");
 
@@ -127,6 +128,66 @@ async function copyTextReliable(text) {
   } catch {
     return { ok: false, method: "none" };
   }
+}
+
+// ==================================================
+// ✅ Supabase
+// ==================================================
+async function getSb() {
+  if (window._sbClient) return window._sbClient;
+  const cfg = await window.loadAppConfig();
+  if (!window.supabase || !window.supabase.createClient) {
+    console.error("❌ Supabase SDK not loaded. Check index.html script order.");
+    return null;
+  }
+  window._sbClient = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+  return window._sbClient;
+}
+
+// ✅ Original: try Supabase session first, fallback to localStorage
+async function getFreshAccessToken() {
+  try {
+    const sb = await getSb();
+    if (sb) {
+      const { data: { session } } = await withTimeout(sb.auth.getSession(), 30000, "getSession");
+      if (session?.access_token) {
+        localStorage.setItem("sb_access_token", session.access_token);
+        return session.access_token;
+      }
+    }
+  } catch (e) {
+    console.warn("getFreshAccessToken: getSession failed, using localStorage fallback:", e);
+  }
+  const stored = localStorage.getItem("sb_access_token");
+  if (stored) return stored;
+  throw new Error("No auth token found. Please log out and log back in.");
+}
+
+// ✅ FINAL FIX: Wait until token is truly ready (session hydration safe)
+async function waitForAccessToken({ maxMs = 45000, intervalMs = 500 } = {}) {
+  const start = Date.now();
+
+  while (Date.now() - start < maxMs) {
+    const stored = localStorage.getItem("sb_access_token");
+    if (stored) return stored;
+
+    try {
+      const sb = await getSb();
+      if (sb) {
+        const { data: { session } } = await sb.auth.getSession();
+        if (session?.access_token) {
+          localStorage.setItem("sb_access_token", session.access_token);
+          return session.access_token;
+        }
+      }
+    } catch {
+      // ignore and retry
+    }
+
+    await sleep(intervalMs);
+  }
+
+  throw new Error("Session still not ready. Please log out and log back in.");
 }
 
 // ==================================================
@@ -258,12 +319,8 @@ function navigate(page, pushState = true) {
       await updateAllocateGate();
       startAgentGatePolling();
 
-      // ✅ Prime token early to avoid "first click authenticating forever"
-      try {
-        await getFreshAccessToken();
-      } catch (e) {
-        console.warn("Token prime failed (will retry on click):", e);
-      }
+      // ✅ Prime token (non-blocking)
+      waitForAccessToken({ maxMs: 15000, intervalMs: 400 }).catch(() => {});
 
       const statusMessage = document.getElementById("status-message");
       if (statusMessage) {
@@ -285,64 +342,6 @@ function routeByPath() {
 }
 
 window.navigate = navigate;
-
-// ==================================================
-// ✅ Supabase
-// ==================================================
-async function getSb() {
-  if (window._sbClient) return window._sbClient;
-  const cfg = await window.loadAppConfig();
-  if (!window.supabase || !window.supabase.createClient) {
-    console.error("❌ Supabase SDK not loaded. Check index.html script order.");
-    return null;
-  }
-  window._sbClient = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
-  return window._sbClient;
-}
-
-// ✅ Always gets freshest possible token — tries Supabase first, falls back to localStorage
-async function getFreshAccessToken() {
-  try {
-    const sb = await getSb();
-    if (sb) {
-      const { data: { session } } = await withTimeout(sb.auth.getSession(), 30000, "getSession");
-      if (session?.access_token) {
-        localStorage.setItem("sb_access_token", session.access_token);
-        return session.access_token;
-      }
-    }
-  } catch (e) {
-    console.warn("getFreshAccessToken: getSession failed, using localStorage fallback:", e);
-  }
-  const stored = localStorage.getItem("sb_access_token");
-  if (stored) return stored;
-  throw new Error("No auth token found. Please log out and log back in.");
-}
-
-async function refreshUIForSession() {
-  const sb = await getSb();
-  if (!sb) return;
-
-  const { data: { session } } = await sb.auth.getSession();
-  if (!session) {
-    localStorage.removeItem("sb_access_token");
-    const p = window.location.pathname.toLowerCase();
-    if (p !== "/login" && p !== "/register") navigate("login", false);
-    return;
-  }
-
-  localStorage.setItem("sb_access_token", session.access_token);
-
-  const path = window.location.pathname.toLowerCase();
-  if (path === "/allocate") navigate("allocate", false);
-  else if (path === "/") navigate("home", false);
-  else if (path === "/login") navigate("login", false);
-  else if (path === "/register") navigate("register", false);
-  else navigate("home", false);
-
-  const userEmailEl = document.getElementById("user-email");
-  if (userEmailEl) userEmailEl.textContent = `Logged in as: ${session.user.email}`;
-}
 
 // ==================================================
 // ✅ Auth functions (GLOBAL)
@@ -439,6 +438,31 @@ window.login = login;
 window.loginWithGoogle = loginWithGoogle;
 window.logout = logout;
 
+async function refreshUIForSession() {
+  const sb = await getSb();
+  if (!sb) return;
+
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) {
+    localStorage.removeItem("sb_access_token");
+    const p = window.location.pathname.toLowerCase();
+    if (p !== "/login" && p !== "/register") navigate("login", false);
+    return;
+  }
+
+  localStorage.setItem("sb_access_token", session.access_token);
+
+  const path = window.location.pathname.toLowerCase();
+  if (path === "/allocate") navigate("allocate", false);
+  else if (path === "/") navigate("home", false);
+  else if (path === "/login") navigate("login", false);
+  else if (path === "/register") navigate("register", false);
+  else navigate("home", false);
+
+  const userEmailEl = document.getElementById("user-email");
+  if (userEmailEl) userEmailEl.textContent = `Logged in as: ${session.user.email}`;
+}
+
 // ==================================================
 // ✅ VM polling (timeout-tolerant)
 // ==================================================
@@ -493,7 +517,7 @@ async function pollVmUntilRunning(accessToken, {
 }
 
 // ==================================================
-// ✅ Existing VM UI (stopped)
+// ✅ Existing VM UI (stopped) — FINAL
 // ==================================================
 function renderStoppedVmChoices(vmInfo, _accessToken) {
   const statusMessage = document.getElementById("status-message");
@@ -547,23 +571,14 @@ function renderStoppedVmChoices(vmInfo, _accessToken) {
     if (n) n.disabled = false;
   }
 
-  // ✅ Use global hardened token getter everywhere + never hang forever
-  async function getFreshTokenFast() {
-    return await withTimeout(getFreshAccessToken(), 15000, "token fetch");
-  }
-
   document.getElementById("resume-vm-btn").onclick = async function () {
     console.log("▶️ Resume clicked, vm_id:", capturedVmId);
     try {
       disableBtns();
-      setMsg("⏳ Authenticating (first load may take a moment)...");
+      setMsg("⏳ Authenticating... (waiting for session)");
 
-      let token;
-      try {
-        token = await getFreshTokenFast();
-      } catch {
-        throw new Error("Auth not ready yet. Wait 2–3 seconds and click Resume again (or refresh).");
-      }
+      // ✅ Will wait up to 45s until session/token exists (no first-click failure)
+      const token = await waitForAccessToken({ maxMs: 45000, intervalMs: 500 });
 
       setMsg("⏳ Requesting resume (may take a few minutes)...");
       const base = await apiBase();
@@ -609,14 +624,9 @@ function renderStoppedVmChoices(vmInfo, _accessToken) {
 
     try {
       disableBtns();
-      setMsg("⏳ Authenticating (first load may take a moment)...");
+      setMsg("⏳ Authenticating... (waiting for session)");
 
-      let token;
-      try {
-        token = await getFreshTokenFast();
-      } catch {
-        throw new Error("Auth not ready yet. Wait 2–3 seconds and try again (or refresh).");
-      }
+      const token = await waitForAccessToken({ maxMs: 45000, intervalMs: 500 });
 
       setMsg("⏳ Terminating old VM...");
       const base = await apiBase();
@@ -690,7 +700,7 @@ async function allocateClickFlow() {
     }
 
     await step("🔑 Getting auth token...");
-    const accessToken = await getFreshAccessToken();
+    const accessToken = await waitForAccessToken({ maxMs: 45000, intervalMs: 500 });
     localStorage.setItem("sb_access_token", accessToken);
 
     setAllocateBusy(true, "Checking existing VM...");
@@ -815,8 +825,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (window.location.pathname.toLowerCase() === "/allocate") {
     await updateAllocateGate();
     startAgentGatePolling();
-    // Prime token on initial load too
-    try { await getFreshAccessToken(); } catch {}
+    waitForAccessToken({ maxMs: 15000, intervalMs: 400 }).catch(() => {});
   }
 
   sb.auth.onAuthStateChange(async () => {
@@ -824,7 +833,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (window.location.pathname.toLowerCase() === "/allocate") {
       await updateAllocateGate();
       startAgentGatePolling();
-      try { await getFreshAccessToken(); } catch {}
+      waitForAccessToken({ maxMs: 15000, intervalMs: 400 }).catch(() => {});
     }
   });
 
